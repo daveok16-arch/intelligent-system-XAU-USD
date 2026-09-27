@@ -91,3 +91,20 @@ renders it for human approval.
   with a missing credential.
 - `AppTest` re-executes the script in a fresh namespace: monkeypatching the imported
   module does not affect it. Use a stub HTTP server for render-path tests.
+
+## Kubernetes (Directive 11)
+- Manifests in `k8s/`: `data-layer.yaml` (Namespace, PVCs, Secret), `cronjobs.yaml`,
+  `web-layer.yaml` (Deployments, Services, HPA, Ingress, ClusterIssuer).
+- **CronJob commands are `python -m engine_macro` / `engine_spatial` with
+  `workingDir: /workspace/project/backend/app`.** Both engines now expose `main()`;
+  before this they had no `__main__` and the jobs exited 0 doing nothing.
+- Engines' `main()` honour the schedule guard and exit non-zero on failure
+  (`restartPolicy: OnFailure`); `--force` bypasses the guard for manual reruns.
+- **Separate ReadWriteOnce PVC per writer.** A single shared PVC gives no single-writer
+  isolation; RWX is unsupported by most CSI drivers and is the wrong tool here.
+- **Secret key must be `SYSTEM_AUTH_TOKEN`** because `envFrom` maps keys to env vars
+  verbatim. The workloads use `envFrom`, not `secretKeyRef`.
+- **API command is `python -m uvicorn main:app` with `workingDir: .../backend`** —
+  `uvicorn backend.main:app` fails (bare uvicorn off PATH + `import market_data`).
+- The Ingress needs a Service (`cockpit-ui-service`, `backend-api-service`); the draft
+  referenced one that did not exist.

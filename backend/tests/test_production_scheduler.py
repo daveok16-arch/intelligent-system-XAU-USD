@@ -11,6 +11,7 @@ These tests instead assert real scheduling behavior with an injected clock.
 import os
 import sys
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -19,6 +20,7 @@ import pytz
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BACKEND_DIR)
 
+_APP_DIR = os.path.join(os.path.dirname(_BACKEND_DIR), "app")
 from orchestrator import should_trigger_weekly_macro, should_trigger_daily_spatial  # noqa: E402
 
 EST = pytz.timezone("US/Eastern")
@@ -89,6 +91,52 @@ class TestWeeklyMacroScheduler(unittest.TestCase):
             fh.write("not,a,valid,repository\n")
         friday_1600 = EST.localize(datetime(2026, 9, 25, 16, 0))
         self.assertTrue(should_trigger_weekly_macro(self.repo, now=friday_1600))
+
+
+class TestCronJobEntryPoints(unittest.TestCase):
+    """The K8s CronJob commands are `python -m engine_macro` / `engine_spatial`.
+
+    Regression: neither module had a __main__ entry point, so both jobs exited 0 with
+    no output -- reporting success while ingesting nothing.
+    """
+
+    def test_engine_macro_has_callable_main(self):
+        sys.path.insert(0, _APP_DIR)
+        import engine_macro
+
+        self.assertTrue(callable(getattr(engine_macro, "main", None)))
+
+    def test_engine_spatial_has_callable_main(self):
+        sys.path.insert(0, _APP_DIR)
+        import engine_spatial
+
+        self.assertTrue(callable(getattr(engine_spatial, "main", None)))
+
+    def test_macro_main_returns_nonzero_when_guard_or_ingest_fails(self):
+        """Fail closed: an unverifiable/incomplete run must not silently 'succeed'."""
+        sys.path.insert(0, _APP_DIR)
+        import engine_macro
+
+        class Boom:
+            def __init__(self, *a, **k):
+                raise RuntimeError("guard/ingest unavailable")
+
+        with unittest.mock.patch.object(engine_macro, "InstitutionalDataIngestor", Boom):
+            rc = engine_macro.main(["--force"])
+        self.assertNotEqual(rc, 0)
+
+    def test_spatial_main_noop_returns_zero_when_cached(self):
+        """A skip (already cached) is a success, not a failure."""
+        sys.path.insert(0, _APP_DIR)
+        import engine_spatial
+
+        with unittest.mock.patch.object(engine_spatial, "SpatialBoundaryEngine") as engine_cls:
+            engine_cls.return_value.output_path = "/dev/null"
+            with unittest.mock.patch(
+                "orchestrator.should_trigger_daily_spatial", return_value=False
+            ):
+                rc = engine_spatial.main([])
+        self.assertEqual(rc, 0)
 
 
 class TestDailySpatialScheduler(unittest.TestCase):

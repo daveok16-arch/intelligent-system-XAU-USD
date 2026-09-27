@@ -1,0 +1,231 @@
+# Stateless, autoscaled API + cockpit web layer.
+#
+# Corrections vs the directive draft:
+#   1. The command `uvicorn backend.main:app` fails: bare `uvicorn` is not on PATH in
+#      this image, and `backend.main` raises ModuleNotFoundError: No module named
+#      'market_data' (backend/main.py imports its sibling by top-level name). Correct
+#      form is `python -m uvicorn main:app` with workingDir=/workspace/project/backend.
+#   2. The Ingress referenced `cockpit-ui-service`, which the draft never defined. That
+#      Service (and the backend Service) are defined here.
+#   3. The Deployment used a `secretKeyRef` to a secret that was never created, and the
+#      draft's own stated approach was `envFrom`. Switched to envFrom as specified.
+#   4. Namespace added; resources, securityContext, and liveness probe added (readiness
+#      alone does not restart a wedged container).
+#   5. Added the cockpit Deployment (the Ingress routes to it) and a /api path so API
+#      traffic is served on the same host.
+#
+# HA / storage caveat: the API mounts the macro volume read-only, but that volume is
+# ReadWriteOnce -- replicas scheduled on different nodes cannot both mount it. For true
+# multi-node HA, either point the API at a shared read-only CSI volume / object store,
+# or keep replicas on one node with a node affinity rule. Left as RWO+ROX-safe for a
+# single-node cluster; resolve before scaling past one node.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gold-backend-api
+  namespace: gold-intelligence
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gold-backend
+  template:
+    metadata:
+      labels:
+        app: gold-backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api-node
+          image: institutional-macro-engine:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"]
+          workingDir: /workspace/project/backend
+          env:
+            - name: DATA_DIR
+              value: /workspace/project/data
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"   # only valid because an in-cluster NGINX ingress terminates the connection
+          envFrom:
+            - secretRef:
+                name: system-auth-credentials
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: macro-data
+              mountPath: /workspace/project/data
+              readOnly: true   # readers cannot corrupt files
+      volumes:
+        - name: macro-data
+          persistentVolumeClaim:
+            claimName: macro-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api-service
+  namespace: gold-intelligence
+spec:
+  selector:
+    app: gold-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gold-cockpit-ui
+  namespace: gold-intelligence
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gold-cockpit
+  template:
+    metadata:
+      labels:
+        app: gold-cockpit
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: cockpit
+          image: institutional-macro-engine:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "streamlit", "run", "frontend/streamlit_app.py",
+                    "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+          workingDir: /workspace/project
+          env:
+            - name: API_BASE
+              value: http://backend-api-service:8000
+            - name: DATA_DIR
+              value: /workspace/project/data
+          envFrom:
+            - secretRef:
+                name: system-auth-credentials
+          ports:
+            - containerPort: 8501
+          readinessProbe:
+            httpGet: { path: /_stcore/health, port: 8501 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+          volumeMounts:
+            - name: macro-data
+              mountPath: /workspace/project/data
+              readOnly: true
+      volumes:
+        - name: macro-data
+          persistentVolumeClaim:
+            claimName: macro-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cockpit-ui-service
+  namespace: gold-intelligence
+spec:
+  selector:
+    app: gold-cockpit
+  ports:
+    - name: http
+      port: 8501
+      targetPort: 8501
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: gold-intelligence
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gold-backend-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 75
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cockpit-ingress
+  namespace: gold-intelligence
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-production"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - gold.institutional-engine.local
+      secretName: gold-cockpit-tls-cert
+  rules:
+    - host: gold.institutional-engine.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-api-service
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cockpit-ui-service
+                port:
+                  number: 8501
+---
+# cert-manager ClusterIssuer expects a real, resolvable domain. A .local host cannot
+# satisfy an ACME HTTP-01 challenge, so this will not issue until the host is public.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: REPLACE_WITH_OPERATIONS_EMAIL@example.com
+    privateKeySecretRef:
+      name: letsencrypt-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

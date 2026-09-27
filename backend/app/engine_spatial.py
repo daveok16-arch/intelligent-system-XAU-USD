@@ -24,6 +24,7 @@ Corrections applied to the Directive 04 draft (each verified against live data):
 """
 
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -38,6 +39,11 @@ _MIN_SESSIONS = _ATR_WINDOW + 2  # 1 shift + 14 window, plus one to satisfy the 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROJECT_DIR = os.path.dirname(_BACKEND_DIR)
 _DATA_DIR = os.getenv("DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
+
+# orchestrator.py (which owns the schedule guards) lives in backend/. Make it
+# importable regardless of whether this module is run as a script or `-m` package.
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
 
 class SpatialDataUnavailable(RuntimeError):
@@ -173,3 +179,48 @@ class SpatialBoundaryEngine:
         os.makedirs(self.data_dir, exist_ok=True)
         processed_df.to_csv(self.output_path, index=False)
         return processed_df
+
+
+def main(argv=None):
+    """Single-shot spatial mapping entry point for the Kubernetes CronJob.
+
+    Honours the daily-roll cache guard so a job that fires repeatedly within one UTC
+    day performs no redundant upstream scrape. Exits non-zero on failure.
+
+    Usage: python -m engine_spatial [--force]
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Daily spatial boundary mapping (single shot).")
+    parser.add_argument("--force", action="store_true", help="Bypass the daily-roll cache guard.")
+    args = parser.parse_args(argv)
+
+    engine = SpatialBoundaryEngine(ticker="GC=F")
+
+    if not args.force:
+        try:
+            from orchestrator import should_trigger_daily_spatial
+
+            if not should_trigger_daily_spatial(engine.output_path):
+                print("⏸️ [SPATIAL JOB] Current daily block already cached. No-op.")
+                return 0
+        except Exception as exc:
+            print(f"⚠️ [SPATIAL JOB] Schedule guard unavailable ({type(exc).__name__}: {exc}); aborting.")
+            return 1
+
+    try:
+        out = engine.execute_pipeline()
+        print(f"✅ [SPATIAL JOB] Boundaries mapped: {len(out)} rows, latest {out.iloc[0]['Date']}.")
+        return 0
+    except SpatialDataUnavailable as exc:
+        print(f"🔴 [SPATIAL JOB] No authentic history available: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"🔴 [SPATIAL JOB] Mapping failed: {type(exc).__name__}: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

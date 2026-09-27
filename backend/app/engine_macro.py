@@ -186,3 +186,50 @@ class InstitutionalDataIngestor:
         # Chronological order keeps the file readable; readers still select by max date.
         df = df.sort_values("week_ending_date").reset_index(drop=True)
         df.to_csv(REPO_PATH, index=False)
+
+
+def main(argv=None):
+    """Single-shot ingestion entry point for the Kubernetes CronJob.
+
+    The CronJob schedule is the coarse timer; this entry point enforces the finer
+    release-window guard so a job that fires early cannot compute against an
+    unreleased tape. Exits non-zero on failure so restartPolicy=OnFailure surfaces it.
+
+    Usage: python -m engine_macro [--force]
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Weekly macro ingestion (single shot).")
+    parser.add_argument("--force", action="store_true", help="Bypass the release-window guard.")
+    args = parser.parse_args(argv)
+
+    if not args.force:
+        try:
+            from orchestrator import should_trigger_weekly_macro
+
+            if not should_trigger_weekly_macro(REPO_PATH):
+                print("⏸️ [MACRO JOB] Outside the Friday 15:30 EST window or week already synced. No-op.")
+                return 0
+        except Exception as exc:
+            # Fail closed: never ingest against an unverifiable clock.
+            print(f"⚠️ [MACRO JOB] Schedule guard unavailable ({type(exc).__name__}: {exc}); aborting.")
+            return 1
+
+    try:
+        director = InstitutionalDataIngestor(asset_symbol="XAU/USD")
+        row = director.synthesize_sentiment_divergence(
+            director.ingest_weekly_macro_gravity(),
+            director.ingest_institutional_fund_flow(),
+        )
+        print(f"✅ [MACRO JOB] Repository refreshed for {row['week_ending_date']} "
+              f"(SDI {row['SDI']}, gate {row['MACRO_GATE']}).")
+        return 0
+    except Exception as exc:
+        print(f"🔴 [MACRO JOB] Ingestion failed: {type(exc).__name__}: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
