@@ -108,3 +108,23 @@ renders it for human approval.
   `uvicorn backend.main:app` fails (bare uvicorn off PATH + `import market_data`).
 - The Ingress needs a Service (`cockpit-ui-service`, `backend-api-service`); the draft
   referenced one that did not exist.
+
+## Backtest (Directive 13)
+- `backend/app/backtest_engine.py` evaluates the production gate rule (long gold while
+  `MACRO_GATE == OPEN`, i.e. SDI > 0.50 AND dovish > 0.50) over real history.
+- **Real data only.** CFTC COT from 1986 (1,935 weekly records), FRED rates, and GC=F
+  prices from 2000 are fetched. The engine raises `BacktestDataUnavailable` rather than
+  simulating returns. Never reintroduce an `np.random` price fallback — a Sharpe computed
+  on random numbers is worse than no answer.
+- **Look-ahead guards:** execution signal is shifted one bar; the SDI percentile is
+  ROLLING (52 weeks), never a full-sample min/max. Both are mutation-verified.
+- Benchmarks buy-and-hold and charges 5 bps round-trip, so the Sharpe is interpretable.
+- History must be fetched, not read from `data/` — those repos hold current state only.
+
+### Measured result (2008-12-19 to 2026-09-25, 928 weeks, 52 trades)
+- Strategy total return **+15.3%**, Sharpe **-0.36**, MDD **-27.9%**
+- Buy-and-hold benchmark: **+416.6%**, Sharpe **0.40**, MDD **-43.6%**
+- Gate-open weeks averaged +0.241%/wk vs +0.196% closed -> edge +0.045%/wk,
+  **t = 0.19** (statistically indistinguishable from chance)
+- **Conclusion: the gate as specified has no demonstrated edge and materially
+  underperforms simply holding gold.** Do not proceed to execution on this rule.
