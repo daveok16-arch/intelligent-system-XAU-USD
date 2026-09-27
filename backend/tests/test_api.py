@@ -31,9 +31,8 @@ def client(tmp_path, monkeypatch):
         ]
     ).to_csv(repo, index=False)
 
-    monkeypatch.setattr(main, "DATA_REPO", str(repo))
+    monkeypatch.setattr(main, "MACRO_REPO", str(repo))
     monkeypatch.setattr(main.market_data, "get_spot", lambda: {"price": 4286.2, "source": "gold-api.com", "as_of": "T"})
-    main._read_repo.cache_clear()
     with TestClient(main.app) as c:
         yield c
 
@@ -62,6 +61,5 @@ def test_health(client):
 
 
 def test_missing_repository_returns_503(client, monkeypatch):
-    monkeypatch.setattr(main, "DATA_REPO", "/nonexistent/repo.csv")
-    main._read_repo.cache_clear()
+    monkeypatch.setattr(main, "MACRO_REPO", "/nonexistent/repo.csv")
     assert client.get("/api/state").status_code == 503
