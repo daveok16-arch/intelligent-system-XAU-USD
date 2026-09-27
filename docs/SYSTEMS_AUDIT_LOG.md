@@ -19,7 +19,7 @@ true **01** — the origin of the system. No renumbering was required.
 
 | # | Module delivered | Commit | Status |
 |---|---|---|---|
-| **01** | **Macro ingestion engine** (Pillars 1 & 2, SDI, gate) | `bfb3114` / `27e3366` | delivered, rewritten |
+| **01** | **Macro ingestion engine** (Pillars 1 & 2, SDI, gate) | `bfb3114` / `27e3366` / this pass | delivered, **rebuilt to the directive's real contract** |
 | 02 | Frontend cockpit HUD (Streamlit) | `89f2400` | delivered, corrected |
 | 03 | Master orchestrator (API + ingestion loop) | `bfb3114` | delivered, corrected |
 | 04 | Spatial boundary mapping engine | `240af17` | delivered, corrected |
