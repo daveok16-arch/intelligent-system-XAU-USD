@@ -180,3 +180,65 @@ renders it for human approval.
 every horizon — there is no post-sweep bounce. The macro gate (Directive 13) and the
 spatial mean-reversion floor (Directives 14–15) are both closed. Reframe as a
 situational-awareness dashboard.
+
+## Intraday microstructure (re-opened research)
+
+Directives 13–15 tested the sweep thesis on DAILY bars. That is the wrong resolution: a
+daily "sweep" is only "the low went below a level", so the push-down-then-recover
+sequence the mechanism depends on is invisible. `backend/app/engine_microstructure.py`
+re-tests it on **13,715 hourly GC=F bars (2024-05 → 2026-09)**, where the sequence is
+observable.
+
+### What IS real (the premise is partly correct)
+
+**Sweep bars show a genuine volume signature:**
+
+| group | mean volume vs trailing median | n |
+|---|---|---|
+| sweep (pierce + close back above) | **2.14×** | 870 |
+| non-sweep | 1.34× | 12,106 |
+| | **t = 13.90** | |
+
+Something structurally real happens at these bars: volume is ~60% higher than normal
+activity at the same level. That is consistent with liquidity being taken. **This part of
+the thesis holds.**
+
+**Sweeps cluster by session** — they are not uniformly distributed:
+
+| session | sweep rate |
+|---|---|
+| NY afternoon (13–16 UTC) | **11.47%** |
+| NY open (8–11) | 5.81% |
+| London open (2–5) | 5.11% |
+| Asia (19–24) | 3.74% |
+
+3× concentration in the NY PM session is a real structural pattern.
+
+### What is NOT real (the tradeable claim fails)
+
+A high "reversion rate" (77–92%) is **not** evidence. Gold drifts up, so price regains
+almost any level eventually. The question is whether *rejection* carries information, and
+that requires a matched contrast:
+
+| horizon | sweep fwd | breakdown fwd | sweep − breakdown | t |
+|---|---|---|---|---|
+| 1 bar | −0.011% | +0.009% | −0.020% | −1.11 |
+| 2 bars | −0.019% | +0.019% | −0.038% | −1.64 |
+| 4 bars | −0.016% | +0.018% | −0.034% | −1.14 |
+| 8 bars | −0.014% | +0.013% | −0.026% | −0.57 |
+| 12 bars | +0.016% | −0.009% | +0.025% | +0.46 |
+
+**A rejected sweep performs no better than an accepted breakdown — if anything slightly
+worse.** Max |t| across all horizons and both level definitions: **1.96**. The rejection
+signature does not predict a reversion.
+
+### Honest verdict
+
+The mechanism is real; the *signal* is not. Liquidity-taking is observable (volume,
+session clustering), but knowing that a sweep just happened tells you nothing about the
+next 1–12 hours that you could trade. **The premise was not wrong — it was untradeable
+as formulated.**
+
+This is a more precise conclusion than "no edge", and it is the second time the daily-vs-
+intraday distinction mattered. It also means the door is not fully closed: a volume-
+conditional or session-conditional formulation was not exhausted here.

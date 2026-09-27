@@ -25,6 +25,8 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -86,11 +88,78 @@ app.add_middleware(
 _BEARER_PREFIX = "bearer "
 _OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
 
+# --- brute-force protection -------------------------------------------------------
+# Repeated 401s from one origin indicate scanning. This is an in-process sliding window,
+# adequate for a single replica. With multiple API replicas each has its own counter, so
+# the effective limit multiplies by replica count -- for cluster-wide enforcement put the
+# limit at the ingress instead (nginx.ingress.kubernetes.io/limit-req).
+FAILED_AUTH_WINDOW_SECONDS = int(os.getenv("AUTH_FAILURE_WINDOW_SECONDS", "60"))
+FAILED_AUTH_MAX = int(os.getenv("AUTH_FAILURE_MAX", "10"))
+_RATE_LIMIT_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
+_failed_auth: dict[str, list[float]] = {}
+_auth_lock = threading.Lock()
+
+
+def _client_key(request):
+    """Best-effort client identity for rate limiting.
+
+    X-Forwarded-For is honoured only because uvicorn is launched with
+    --forwarded-allow-ips (loopback only by default), so the header is trusted solely
+    when set by our own ingress.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _record_failure(key):
+    now = time.time()
+    with _auth_lock:
+        history = [t for t in _failed_auth.get(key, []) if now - t < FAILED_AUTH_WINDOW_SECONDS]
+        history.append(now)
+        _failed_auth[key] = history
+        # Bound memory: drop keys whose windows have fully aged out.
+        if len(_failed_auth) > 4096:
+            for k in [k for k, v in _failed_auth.items() if not v or now - v[-1] > FAILED_AUTH_WINDOW_SECONDS]:
+                _failed_auth.pop(k, None)
+        return len(history)
+
+
+def _is_rate_limited(key):
+    now = time.time()
+    with _auth_lock:
+        history = [t for t in _failed_auth.get(key, []) if now - t < FAILED_AUTH_WINDOW_SECONDS]
+        _failed_auth[key] = history
+        return len(history) >= FAILED_AUTH_MAX
+
+
+def _clear_failures(key):
+    with _auth_lock:
+        _failed_auth.pop(key, None)
+
 
 def system_auth_token():
     """The configured bearer token, or None when none is provisioned."""
     token = (os.getenv("SYSTEM_AUTH_TOKEN") or "").strip()
     return token or None
+
+
+def accepted_tokens():
+    """All currently valid tokens: the primary plus any previous values during rotation.
+
+    SYSTEM_AUTH_TOKEN_PREVIOUS may hold a comma-separated list, so a token can be
+    rotated without dropping in-flight clients: set the new primary, move the old value
+    into PREVIOUS, deploy, then remove PREVIOUS once clients have moved over.
+    """
+    tokens = []
+    primary = system_auth_token()
+    if primary:
+        tokens.append(primary)
+    previous = (os.getenv("SYSTEM_AUTH_TOKEN_PREVIOUS") or "").strip()
+    if previous:
+        tokens.extend(t.strip() for t in previous.split(",") if t.strip())
+    return tokens
 
 
 def _generate_ephemeral_token():
@@ -103,14 +172,13 @@ def _generate_ephemeral_token():
     return token
 
 
-def _unauthorized(request, detail):
+def _unauthorized(request, detail, extra_headers=None):
     """Emit a spec-compliant challenge. Never leaks whether the token was near-correct."""
-    logger.warning("[AUTH] Rejected %s %s from %s", request.method, request.url.path, request.client.host if request.client else "unknown")
-    return JSONResponse(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        content={"detail": detail},
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    logger.warning("[AUTH] Rejected %s %s from %s", request.method, request.url.path, _client_key(request))
+    headers = {"WWW-Authenticate": "Bearer"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": detail}, headers=headers)
 
 
 @app.middleware("http")
@@ -119,18 +187,38 @@ async def enforce_bearer_auth(request: Request, call_next):
     if path in _OPEN_PATHS or request.method == "OPTIONS" or not path.startswith("/api/"):
         return await call_next(request)
 
-    configured = system_auth_token()
-    expected = configured or _ephemeral_token()
+    key = _client_key(request)
+    if _is_rate_limited(key):
+        logger.warning("[AUTH] Rate limited %s after %d failures in %ds",
+                       key, FAILED_AUTH_MAX, FAILED_AUTH_WINDOW_SECONDS)
+        return JSONResponse(
+            status_code=_RATE_LIMIT_STATUS,
+            content={"detail": "Too many failed authentication attempts. Retry later."},
+            headers={"Retry-After": str(FAILED_AUTH_WINDOW_SECONDS)},
+        )
+
+    expected_tokens = accepted_tokens() or [_ephemeral_token()]
 
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith(_BEARER_PREFIX):
+        _record_failure(key)
         return _unauthorized(request, "Missing or malformed Authorization header.")
 
     presented = header[len(_BEARER_PREFIX):].strip()
-    # Constant-time comparison resists timing oracles.
-    if not hmac.compare_digest(presented, expected):
-        return _unauthorized(request, "Invalid signature matrix. Institutional access denied.")
+    # Constant-time comparison against every accepted token; no early exit, so timing
+    # does not reveal which value matched.
+    matched = False
+    for candidate in expected_tokens:
+        if hmac.compare_digest(presented, candidate):
+            matched = True
 
+    if not matched:
+        count = _record_failure(key)
+        remaining = max(FAILED_AUTH_MAX - count, 0)
+        return _unauthorized(request, "Invalid signature matrix. Institutional access denied.",
+                             {"X-Auth-Failures-Remaining": str(remaining)})
+
+    _clear_failures(key)
     return await call_next(request)
 
 
