@@ -243,6 +243,42 @@ This is a more precise conclusion than "no edge", and it is the second time the 
 intraday distinction mattered. It also means the door is not fully closed: a volume-
 conditional or session-conditional formulation was not exhausted here.
 
+## Data-integrity impact assessment (post-database)
+
+The database constraints surfaced **441 impossible bars** in the upstream Yahoo GC=F daily
+series (`high` below `max(open,low,close)`), which the CSV pipeline had been serving
+silently. The obvious question is whether any published conclusion depended on that
+corruption. It is now bounded rather than assumed:
+
+| repair effect | measurement |
+|---|---|
+| bars touched | 441 of 6,543 |
+| mean distortion | 0.33% relative |
+| max distortion | 7.9% relative |
+| **`Close` changed** | **0 bars (max delta 0.0)** |
+| intraday impossible bars | **0 of 13,715** |
+
+Because the repair only widens `High`/`Low` to an internally consistent envelope and never
+touches `Close`, the impact is **provably nil** for every conclusion that uses returns:
+
+- **Macro gate backtest (D13)** — uses `Close` for returns. Mathematically unaffected.
+- **Volatility / conditional / walk-forward studies** — intraday bars had zero impossible
+  bars. Untouched.
+- **Spatial sweep backtest (D14)** — the one test using `High`/`Low`/`ATR`. Re-run on
+  repaired data:
+
+  | data | trades | win | avg | t vs baseline |
+  |---|---|---|---|---|
+  | original (corrupted) | 1,424 | 45.58% | +0.0043% | −1.873 |
+  | **repaired** | 1,431 | 45.14% | −0.0075% | **−2.105** |
+
+  Same sign, slightly stronger. The conclusion ("the sweep entry underperforms holding")
+  **holds and sharpens** — repaired data moves it from non-significant to significantly
+  negative. Corruption had been *flattering* the strategy, not creating it.
+
+No qualitative conclusion in this project changes. Two quantitative details (win rate
+−0.44pp, t −0.23) shift marginally in the direction of the existing verdict.
+
 ## Conditional studies + walk-forward (the substantive finding)
 
 Following the volume and session leads, three further pre-registered studies were run.

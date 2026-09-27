@@ -126,6 +126,42 @@ def test_repair_widens_impossible_bars_without_inventing_values():
     assert fixed.loc[0, "high"] in original_values
 
 
+def test_repair_never_touches_close():
+    """The repair must be provably impact-free for return-based studies.
+
+    It only widens High/Low to an internally consistent envelope. If it ever altered
+    Close, every backtest conclusion would be in question -- so this is a guard, not a
+    detail.
+    """
+    df = pd.DataFrame({
+        "date": ["a", "b", "c"],
+        "open": [1164.3, 10.0, 100.0],
+        "high": [1163.0, 12.0, 99.0],   # first and third are impossible
+        "low": [1164.3, 9.0, 95.0],
+        "close": [1164.3, 11.0, 97.0],
+    })
+    fixed, n = repo.repair_ohlc(df)
+    assert n == 2
+    # Close is untouched, on every row.
+    assert (fixed["close"] == df["close"]).all()
+    # Open is untouched too -- only the envelope is widened.
+    assert (fixed["open"] == df["open"]).all()
+    # After repair the frame is internally coherent.
+    assert (fixed["high"] >= fixed[["open", "low", "close"]].max(axis=1)).all()
+    assert (fixed["low"] <= fixed[["open", "high", "close"]].min(axis=1)).all()
+
+
+def test_repair_is_idempotent():
+    """Repairing already-repaired data must be a no-op, so repeated imports are safe."""
+    df = pd.DataFrame({"date": ["a"], "open": [1164.3], "high": [1163.0],
+                       "low": [1164.3], "close": [1164.3]})
+    once, n1 = repo.repair_ohlc(df)
+    twice, n2 = repo.repair_ohlc(once)
+    assert n1 == 1
+    assert n2 == 0
+    assert once["high"].iloc[0] == twice["high"].iloc[0]
+
+
 def test_repair_is_a_noop_on_clean_data():
     df = pd.DataFrame({"date": ["d1"], "open": [10.0], "high": [12.0],
                        "low": [9.0], "close": [11.0]})
