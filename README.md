@@ -20,11 +20,49 @@ right now, in historical context?"* — with every number traceable to a real so
 
 | Layer | What it does |
 |---|---|
-| **Data** | Weekly CFTC gold positioning (1986→), FRED rate path, daily gold OHLC (2000→) |
+| **Data** | Transactional repository (SQLite default, PostgreSQL-ready) holding weekly CFTC positioning (1986→), FRED rate path, daily gold OHLC (2000→), hourly bars |
 | **Indicators** | 52-week rolling positioning percentile (SDI), Fed-path dovish proxy, structural swing levels + ATR |
 | **API** | Authenticated FastAPI service — state, history, and chart series endpoints |
 | **Dashboard** | Streamlit monitor with trend context, percentile bands, and honest degraded states |
 | **Ops** | Docker, docker-compose, Kubernetes (CronJobs + HPA + Ingress), adversarial verification gate |
+
+## Data repository
+
+Layer 3 of the architecture is a **database**, selected by `DATABASE_URL`:
+
+```bash
+DATABASE_URL=sqlite:///data/institutional.db                                   # default
+DATABASE_URL=postgresql+psycopg://user:pass@host:5432/institutional            # production
+```
+
+Same tables, same constraints, same code — no changes to move between them.
+
+```bash
+python -m backend.app.repository --init           # create schema
+python -m backend.app.repository --migrate-csv    # import the CSV repositories
+python -m backend.app.repository --status         # row counts + freshness + last ingestion
+```
+
+| Table | Rows | Span |
+|---|---|---|
+| `macro_weekly` | 1,935 | 1986-01 → 2026-09 |
+| `spatial_daily` | 6,529 | 2000-09 → 2026-09 |
+| `price_daily` | 6,543 | 2000-08 → 2026-09 |
+| `price_intraday` | 13,715 | 2024-05 → 2026-09 (hourly) |
+| `ingestion_log` | audit trail | every task, status, row count |
+
+**Integrity is enforced by the database, not by convention.** Unique keys prevent
+duplicate report weeks; check constraints reject an out-of-range SDI, a reference level
+above the structural low, an inverted OHLC bar, a non-positive close, and an invalid gate
+value. Writes are transactional, so a reader sees either the previous committed state or
+the new one — never a partial write.
+
+> **Data-quality finding:** the database constraints immediately surfaced **441 impossible
+> bars** in the upstream Yahoo GC=F series (`high` below `max(open,low,close)`) that had
+> been flowing silently through the CSV pipeline. The vendor defect cannot be fixed at
+> source, so `repair_ohlc()` widens each impossible bar to its internally consistent
+> envelope — using only values already present, inventing nothing — and flags it in a
+> `repaired` column. The API prefers the database and falls back to CSV.
 
 ## Data provenance
 

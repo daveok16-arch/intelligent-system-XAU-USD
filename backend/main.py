@@ -466,7 +466,53 @@ class PriceHistoryResponse(BaseModel):
     source: str
 
 
-def _read_history(path, required):
+def _read_history_from_db(table, required):
+    """Read a history table from the database. Returns None if unavailable.
+
+    The API prefers the database (transactional, constraint-checked, network-reachable)
+    and falls back to the CSV files when no database is present, so both deployments
+    work during transition.
+    """
+    try:
+        import repository
+        from sqlalchemy import select
+    except Exception:
+        return None
+    try:
+        engine = repository.get_engine()
+        model = {
+            "macro_weekly": repository.MacroWeekly,
+            "price_daily": repository.PriceDaily,
+            "spatial_daily": repository.SpatialDaily,
+        }.get(table)
+        if model is None:
+            return None
+        with repository.Session(engine) as s:
+            rows = s.execute(select(model)).scalars().all()
+            if not rows:
+                return None
+            data = {c.name: [getattr(r, c.name) for r in rows] for c in model.__table__.columns}
+        df = pd.DataFrame(data)
+        # Normalise to the column names the rest of the API already uses.
+        renames = {"report_date": "date", "session_date": "date", "sdi": "SDI",
+                   "commercial_net": "Commercial_Net", "fedwatch_dovish_prob": "fedwatch_dovish_prob"}
+        df = df.rename(columns=renames)
+        df["_d"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["_d"]).sort_values("_d").reset_index(drop=True)
+        df["date"] = df["_d"].dt.strftime("%Y-%m-%d")
+        if df.empty or any(c not in df.columns for c in required):
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _read_history(path, required, table=None):
+    """Database first, CSV fallback. 503 only if neither source can serve the data."""
+    if table:
+        db = _read_history_from_db(table, required)
+        if db is not None and not db.empty:
+            return db
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -492,7 +538,7 @@ def _read_history(path, required):
 def get_macro_history(limit: int = Query(default=260, ge=1, le=5000,
                                          description="Most recent weekly rows to return.")):
     """Multi-decade positioning + macro context: trend, range, and change over time."""
-    df = _read_history(_MACRO_HISTORY, ["date", "SDI", "Commercial_Net", "fedwatch_dovish_prob"])
+    df = _read_history(_MACRO_HISTORY, ["date", "SDI", "Commercial_Net", "fedwatch_dovish_prob"], table="macro_weekly")
     window = df.tail(limit)
 
     latest = df.iloc[-1]
@@ -526,7 +572,7 @@ def get_macro_history(limit: int = Query(default=260, ge=1, le=5000,
 @app.get("/api/v1/price-history", response_model=PriceHistoryResponse)
 def get_price_history():
     """Trend and volatility context for the underlying."""
-    df = _read_history(_PRICE_HISTORY, ["date", "close"])
+    df = _read_history(_PRICE_HISTORY, ["date", "close"], table="price_daily")
     latest = df.iloc[-1]
     close = float(latest["close"])
 
