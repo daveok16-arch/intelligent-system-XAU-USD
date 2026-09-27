@@ -123,8 +123,14 @@ class SpatialBoundaryEngine:
             return None
 
     # --- computation -------------------------------------------------------------
-    def calculate_boundaries(self, df, source):
-        """Compute structural swing coordinates. Pure function of the input frame."""
+    def calculate_boundaries(self, df, source=None):
+        """Compute structural swing coordinates. Pure function of the input frame.
+
+        `source` labels provenance. It defaults to the live label for this ticker,
+        but callers serving cached data must pass `CACHE_<ticker>` so a fallback
+        payload is never misrepresented as a live fetch.
+        """
+        source = source or f"YFINANCE_{self.ticker}"
         if len(df) < _MIN_SESSIONS:
             raise ValueError(
                 f"insufficient history: need >= {_MIN_SESSIONS} sessions for a 3-day swing "

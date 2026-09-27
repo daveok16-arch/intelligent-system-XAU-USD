@@ -156,3 +156,55 @@ def test_execute_pipeline_writes_repository(engine, monkeypatch):
     assert os.path.exists(engine.output_path)
     assert len(out) > 0
     assert set(out["Source"]) == {"YFINANCE_GC=F"}
+
+
+# --- Directive 05 scenario, adapted -------------------------------------------------
+# The provided test called calculate_boundaries(df) with one argument and expected
+# runner output "Ran 1 test ... OK". Two corrections were required:
+#   1. `source` is now optional (defaults to the live label), so the call works while
+#      still allowing cache servings to be labelled honestly.
+#   2. The class must subclass unittest.TestCase, otherwise both
+#      `python -m unittest <file>` and `python -m unittest <module>` report 0 tests run.
+import unittest  # noqa: E402
+
+
+class TestSpatialBoundaryEngineDirective(unittest.TestCase):
+    def setUp(self):
+        self.engine = es.SpatialBoundaryEngine(ticker="TEST_TICKER", data_dir=None)
+        self.mock_dates = pd.date_range(start="2026-09-01", periods=20, freq="B")
+
+    def _frame(self):
+        return pd.DataFrame({
+            "Date": self.mock_dates,
+            "High": [2500.0 + i for i in range(20)],
+            "Low": [2400.0 - i for i in range(20)],
+            "Close": [2450.0] * 20,
+        })
+
+    def test_single_argument_call_defaults_to_live_source(self):
+        result = self.engine.calculate_boundaries(self._frame())
+        self.assertIn("Sweep_Floor", result.columns)
+        self.assertEqual(result.iloc[0]["Source"], "YFINANCE_TEST_TICKER")
+
+    def test_sweep_floor_is_low_minus_1_50(self):
+        result = self.engine.calculate_boundaries(self._frame())
+        latest = result.iloc[0]
+        self.assertAlmostEqual(latest["Sweep_Floor"], latest["Three_Day_Low"] - 1.50, places=6)
+
+    def test_no_lookahead_latest_uses_only_prior_sessions(self):
+        """Mutation guard: the newest row must exclude its own High/Low."""
+        df = self._frame()
+        result = self.engine.calculate_boundaries(df)
+        latest = result.iloc[0]
+        # Latest bar's High (2519.0) must NOT appear in its own 3-day structural high.
+        self.assertLess(latest["Three_Day_High"], float(df["High"].max()))
+        self.assertGreater(latest["Three_Day_Low"], float(df["Low"].min()))
+
+    def test_atr_is_never_a_fabricated_constant(self):
+        """Regression guard for the Directive 04 fillna(10.0) defect."""
+        result = self.engine.calculate_boundaries(self._frame())
+        self.assertNotIn(10.0, set(result["ATR_14"].tolist()))
+
+
+if __name__ == "__main__":
+    unittest.main()
