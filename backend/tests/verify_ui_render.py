@@ -87,9 +87,9 @@ def collect_state():
         state["fedwatch"] = f"{dovish_pct:.1f}%"
         state["dovish_label"] = "DOVISH" if (dovish_pct / 100.0) > DOVISH_LABEL_THRESHOLD else "HAWKISH"
         state["sdi"] = f"{sdi_value:+.2f}"  # matches the HUD's {sdi:+.2f}
-        state["sdi_label"] = ("SMART MONEY ACCUMULATING"
+        state["sdi_label"] = ("NET POSITIONING: UPPER RANGE"
                               if sdi_value > SDI_ACCUMULATING_THRESHOLD
-                              else "SMART MONEY DISTRIBUTING")
+                              else "NET POSITIONING: LOWER RANGE")
         state["sdi_color_ok"] = sdi_value > SDI_ACCUMULATING_THRESHOLD
         state["macro_date"] = str(macro["week_ending_date"])
         state["source"] = str(macro.get("source", "UNKNOWN"))
@@ -107,11 +107,11 @@ def collect_state():
 def render(state):
     """ASCII projection mirroring the live HUD layout."""
     if state["gate"] == "OPEN":
-        banner = "🟢 SYSTEM ENTER GATE OPEN — SEARCHING FOR SESSION LIQUIDITY SWEEPS"
+        banner = "🟢 CONDITIONS MET — FUND FLOW & MACRO BOTH FAVOURABLE (observational only)"
     elif state["gate"] == "CLOSED":
-        banner = "🔴 SYSTEM ENTER GATE CLOSED — MACRO BIAS INACTIVE"
+        banner = "🔴 CONDITIONS NOT MET — MACRO FILTER UNFAVOURABLE (observational only)"
     else:
-        banner = "⚪ SYSTEM STATE UNAVAILABLE — NO AUTHORITATIVE MACRO RECORD"
+        banner = "⚪ MACRO STATE UNAVAILABLE — NO AUTHORITATIVE RECORD"
 
     W = 88
     line = "─" * (W - 2)
@@ -126,20 +126,21 @@ def render(state):
         return box(f"{a:<{C1}}│ {b:<{C2}}│ {c:<{C3}}")
 
     out.append("┌" + line + "┐")
-    out.append(box("📊 XAU/USD UNIFIED STRATEGY COCKPIT — LIVE RENDER PROJECTION"))
+    out.append(box("📊 XAU/USD INSTITUTIONAL SITUATIONAL-AWARENESS DASHBOARD"))
+    out.append(box("⚠️  OBSERVATIONAL — backtested with no significant edge; not a signal"))
     out.append("├" + line + "┤")
     out.append(box(""))
-    out.append(box("🛡️  SYSTEM EXECUTIVE CONTROL STATE"))
+    out.append(box("🛡️  MACRO REGIME MONITOR"))
     out.append(box(f"   {banner}"))
     out.append(box(""))
     out.append(box(f"   Macro record as of {state['macro_date']}   (source: {state['source']})"))
     out.append("├" + line + "┤")
     out.append(three("🌐 GLOBAL MACRO GRAVITY", "📊 INSTITUTIONAL FUND FLOW", "📍 SPATIAL MARKET BOUNDARY"))
-    out.append(three("Policy-Path Dovish Pivot Proxy", "Sentiment Divergence (SDI)", "3-Day Structural Low → Floor"))
+    out.append(three("Policy-Path Dovish Pivot Proxy", "Commercial Positioning Percentile", "3-Day Structural Low → Reference"))
     out.append(three(f"Value: {state['fedwatch']}", f"Value: {state['sdi']}", f"3D LOW: {state['low']}"))
-    out.append(three(f"Bias:  {state['dovish_label']}", state["sdi_label"], f"FLOOR: {state['floor']}"))
-    out.append(three("(FRED proxy, not", "", f"ATR(14): {state['atr']}"))
-    out.append(three(" CME FedWatch)", "", f"BUFFER: ${SWEEP_BUFFER_USD:.2f} (150 pips)"))
+    out.append(three(f"Bias:  {state['dovish_label']}", state["sdi_label"], f"REF LEVEL: {state['floor']}"))
+    out.append(three("(FRED proxy, not", "of trailing 52w range", f"ATR(14): {state['atr']}"))
+    out.append(three(" CME FedWatch)", "", f"OFFSET: ${SWEEP_BUFFER_USD:.2f} (150 pips)"))
     out.append("├" + line + "┤")
     out.append(box("📈 GOLD PRICE HISTORY"))
     out.append(box(f"   Spatial record as of {state['spatial_date']}   (source: {state['spatial_source']})"))

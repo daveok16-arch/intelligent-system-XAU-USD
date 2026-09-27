@@ -155,3 +155,41 @@ def test_macro_half_skipped_when_no_macro_history(engine, monkeypatch):
     grid = opt.run_combinatorial_sweep()
     if not grid.empty:
         assert not grid["Macro_Gated"].any()
+
+
+# --- unittest compatibility -------------------------------------------------------
+# The directive's verification command is `python -m unittest backend/tests/test_strategy_optimizer.py`,
+# which collects only TestCase classes. These wrappers ensure that command reports real
+# results instead of "NO TESTS RAN".
+import unittest  # noqa: E402
+
+from backtest_spatial import SpatialEdgeBacktester as _Engine  # noqa: E402
+
+
+class TestStrategyOptimizer(unittest.TestCase):
+    def setUp(self):
+        self.opt = so.IntegratedStrategyOptimizer()
+
+    def test_tensor_bounds_processing(self):
+        """The directive's named test: the sweep must return a valid frame."""
+        bars = _Engine().build_structure(_bars(300))
+        self.opt.load_bars_with_regime = lambda: bars
+        so.TARGET_MULTS, so.STOP_MULTS, so.HOLD_WINDOWS = [1.0], [1.0], [3]
+        so.MIN_TRADES = 5
+        grid = self.opt.run_combinatorial_sweep()
+        self.assertIsNotNone(grid)
+        self.assertIsInstance(grid, pd.DataFrame)
+
+    def test_entry_bar_foresight_defaults_off(self):
+        """Regression: crediting an exit on the entry bar flips the sign of the result."""
+        sig = inspect.signature(_Engine().simulate)
+        self.assertFalse(sig.parameters["allow_entry_bar_exit"].default)
+
+    def test_optimizer_has_no_synthetic_price_fallback(self):
+        tree = ast.parse(inspect.getsource(so))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                if node.body and isinstance(node.body[0], ast.Expr) \
+                        and isinstance(node.body[0].value, ast.Constant):
+                    node.body = node.body[1:]
+        self.assertNotIn("gold_historical_daily_raw", ast.unparse(tree))

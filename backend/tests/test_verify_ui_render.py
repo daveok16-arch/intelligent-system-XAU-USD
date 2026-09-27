@@ -46,13 +46,13 @@ def test_sdi_formatting_matches_the_hud(repos):
 
 def test_gate_banner_matches_hud_wording(repos):
     view = vr.render(vr.collect_state())
-    assert "SYSTEM ENTER GATE CLOSED — MACRO BIAS INACTIVE" in view
+    assert "CONDITIONS NOT MET" in view
 
 
 def test_sdi_label_uses_the_hud_threshold(repos):
-    """0.3072 < 0.50, so the HUD labels it DISTRIBUTING, not ACCUMULATING."""
+    """0.3072 < 0.50, so it reads as lower-range positioning."""
     state = vr.collect_state()
-    assert state["sdi_label"] == "SMART MONEY DISTRIBUTING"
+    assert state["sdi_label"] == "NET POSITIONING: LOWER RANGE"
 
 
 def test_spatial_fields_match_hud_values(repos):

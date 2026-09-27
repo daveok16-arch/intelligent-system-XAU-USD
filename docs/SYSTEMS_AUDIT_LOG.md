@@ -3,6 +3,12 @@
 Traceability record from the original raw directive set to the current multi-pod
 Kubernetes architecture. Intended for handover and post-mortem use.
 
+> **RESEARCH OUTCOME (final):** The system is an **Institutional Situational-Awareness
+> Dashboard**. Both the macro gate (Directive 13) and the spatial mean-reversion sweep
+> (Directives 14–15) were backtested over 2000–2026 and show **no statistically
+> significant trading edge**. It must not be used to place or size trades. The
+> quantitative findings are in §4g; the reframing is in §7.
+
 **Repository:** `daveok16-arch/intelligent-system-XAU-USD`
 **Head at time of audit:** `5fbe97d`
 **Automated tests:** 91 passing (`python -m pytest backend/tests frontend/tests -q`)
@@ -191,10 +197,45 @@ Recorded so they are not mistaken for solved:
 
 ## 7. Assessment
 
-The system is a rigorously verified **single-node reference deployment**. Its defining
-property is that it does not lie: no fabricated data reaches the cockpit, unavailable
-sources are visibly unavailable, and the verification gate fails when infrastructure
-is wrong.
+The system is a rigorously verified **single-node reference deployment** of an
+**Institutional Situational-Awareness Dashboard**. Its defining property is that it does
+not lie: no fabricated data reaches the cockpit, unavailable sources are visibly
+unavailable, and the verification gate fails when infrastructure is wrong.
+
+### 4g. Quantitative research outcome (Directives 13–15)
+
+Three independent backtests, all against real data and the correct null (the
+unconditional hold, not zero), all negative:
+
+| Test | Result | Verdict |
+|---|---|---|
+| Macro gate (D13) | Sharpe −0.36 vs +0.40 buy-hold; −400pts; selection t=0.19 | no edge |
+| Spatial sweep 1.5/1.0/3 (D14) | t = −1.30 vs baseline; win 46.35% | no edge |
+| Parameter tensor 150 cells (D15) | 104 exceed \|t\|>2 in-sample from entry-convention bias | artefact |
+| Convention-free sweep test | sweep forward returns **below** average at 1/2/3/5 bars | **no post-sweep bounce** |
+
+The decisive test (both sides buy at the close, so no convention can bias it) shows
+post-sweep forward returns of +0.007/+0.028/+0.060/+0.168% versus unconditional
++0.049/+0.097/+0.145/+0.242% — the sweep event predicts nothing.
+
+**Two production-critical measurement traps were identified and are now guarded by tests:**
+1. *Null-hypothesis inflation* — testing against zero rather than the market baseline.
+   Gold's drift makes any long-only rule look significant. A draft reported t=+0.73
+   against zero and t=−1.30 against the baseline: opposite signs.
+2. *Entry-bar foresight* — crediting an exit on the entry bar assumes the bar's high
+   printed after the low that filled us. On the best grid cell this alone flipped
+   t from **+6.16 to −6.64**.
+
+Do not reintroduce either. Both have regression guards in the test suite.
+
+### Reframing (Option 3, adopted)
+
+The application is presented as an **observational intelligence monitor**:
+- UI retitled; a persistent "NOT A TRADING SIGNAL" notice is rendered on every load.
+- Regime banner wording changed from trade instruction to condition description.
+- SDI card relabelled as a positioning percentile, not "smart money accumulating".
+- Spatial card relabelled as reference geometry, explicitly "not an entry level".
+- API OpenAPI description carries the same research notice.
 
 It is not yet battle-tested on production infrastructure. Items §6 should be closed
-before it carries capital.
+before it runs against real traffic.

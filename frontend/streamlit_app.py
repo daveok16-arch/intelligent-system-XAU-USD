@@ -81,8 +81,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("📊 XAU/USD Unified Strategy Cockpit")
-st.subheader("Institutional Portfolio Management & Macro Intelligence Terminal")
+st.title("📊 XAU/USD Institutional Situational-Awareness Dashboard")
+
+st.subheader("Macro & Liquidity Intelligence Monitor — Observational, Not Advisory")
+
+st.markdown(
+    """
+    <div style="background-color:#161b22;border:1px solid #d29922;border-left:4px solid #d29922;
+                padding:12px 16px;border-radius:6px;margin-bottom:8px;">
+        <strong style="color:#d29922;">⚠️ RESEARCH NOTICE — NOT A TRADING SIGNAL</strong><br>
+        <span style="color:#c9d1d9;">
+        This dashboard reports macro and positioning conditions for situational awareness.
+        Its indicator has been backtested over 2000&ndash;2026 (macro gate and spatial sweep)
+        and <strong>shows no statistically significant trading edge</strong>. It must not be
+        used as a buy/sell signal or to size positions. See docs/SYSTEMS_AUDIT_LOG.md.
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 st.markdown("---")
 
 
@@ -208,22 +225,27 @@ def _fmt(value, spec=",.2f", prefix="$"):
     return f"{prefix}{value:{spec}}" if value is not None else "—"
 
 
-# --- Row 1: system status banner -------------------------------------------------
-st.markdown("### 🛡️ System Executive Control State")
+# --- Row 1: macro regime banner ---------------------------------------------------
+# These are OBSERVATIONAL regime labels, not entry instructions. The prior wording
+# ("SYSTEM ENTER GATE OPEN — SEARCHING FOR LIQUIDITY SWEEPS") implied a trade
+# instruction that the backtests did not support.
+st.markdown("### 🛡️ Macro Regime Monitor")
 gate_status = macro["system_gate_status"]
 if gate_status == "OPEN":
     st.markdown(
-        '<div class="gate-open">🟢 SYSTEM ENTER GATE OPEN — SEARCHING FOR SESSION LIQUIDITY SWEEPS</div>',
+        '<div class="gate-open">🟢 CONDITIONS MET — FUND FLOW &amp; MACRO BOTH FAVOURABLE '
+        '(observational only)</div>',
         unsafe_allow_html=True,
     )
 elif gate_status == "CLOSED":
     st.markdown(
-        '<div class="gate-closed">🔴 SYSTEM ENTER GATE CLOSED — MACRO BIAS INACTIVE</div>',
+        '<div class="gate-closed">🔴 CONDITIONS NOT MET — MACRO FILTER UNFAVOURABLE '
+        '(observational only)</div>',
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
-        '<div class="gate-closed">⚪ SYSTEM STATE UNAVAILABLE — NO AUTHORITATIVE MACRO RECORD</div>',
+        '<div class="gate-closed">⚪ MACRO STATE UNAVAILABLE — NO AUTHORITATIVE RECORD</div>',
         unsafe_allow_html=True,
     )
 
@@ -253,16 +275,19 @@ with col2:
     if sdi is None:
         sdi_color, sdi_label, sdi_text = "#8b949e", "DATA UNAVAILABLE", "—"
     else:
-        sdi_color = "#238636" if sdi > 0.50 else "#da3633"
-        sdi_label = "SMART MONEY ACCUMULATING" if sdi > 0.50 else "SMART MONEY DISTRIBUTING"
+        sdi_color = "#58a6ff"
+        # Descriptive positioning bands, not a recommendation.
+        sdi_label = ("NET POSITIONING: UPPER RANGE" if sdi > 0.50
+                     else "NET POSITIONING: LOWER RANGE")
         sdi_text = f"{sdi:+.2f}"
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>📊 INSTITUTIONAL FUND FLOW</h4>
-            <p>Sentiment Divergence Index (SDI)</p>
+            <p>Commercial Positioning Percentile (SDI)</p>
             <h2 style="color: {sdi_color};">{sdi_text}</h2>
             <p style="color: {sdi_color};">{sdi_label}</p>
+            <p style="color: #8b949e;">Percentile of the trailing 52-week range</p>
         </div>
     """,
         unsafe_allow_html=True,
@@ -276,10 +301,11 @@ with col3:
         f"""
         <div class="metric-card">
             <h4>📍 SPATIAL MARKET BOUNDARY</h4>
-            <p>3-Day Structural Low → Sweep Floor</p>
+            <p>3-Day Structural Low → Reference Level</p>
             <h2>{_fmt(floor)}</h2>
-            <p style="color: #58a6ff;">3D LOW: {_fmt(low)} · BUFFER: ${SWEEP_BUFFER_USD:.2f} (150 pips)</p>
+            <p style="color: #58a6ff;">3D LOW: {_fmt(low)} · OFFSET: ${SWEEP_BUFFER_USD:.2f} (150 pips)</p>
             <p style="color: #8b949e;">ATR(14): {f"{atr:,.2f}" if atr is not None else "—"}</p>
+            <p style="color: #8b949e;">Reference geometry only — not an entry level</p>
         </div>
     """,
         unsafe_allow_html=True,

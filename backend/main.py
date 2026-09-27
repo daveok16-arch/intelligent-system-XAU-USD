@@ -49,9 +49,15 @@ SPATIAL_REPO = os.getenv(
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
 
 app = FastAPI(
-    title="Institutional Macro & Liquidity Engine API",
-    description="Routing engine delivering validated multi-frequency macro and liquidity matrices.",
-    version="1.1.0",
+    title="Institutional Situational-Awareness API (XAU/USD)",
+    description=(
+        "Observational macro and positioning data for XAU/USD. "
+        "RESEARCH NOTICE: the indicator served here was backtested over 2000-2026 "
+        "(macro gate and spatial sweep) and shows no statistically significant trading "
+        "edge. It is situational-awareness data, not a buy/sell signal. "
+        "See docs/SYSTEMS_AUDIT_LOG.md."
+    ),
+    version="2.0.0",
 )
 
 # Read-only public data surface: GET only, no credentials. Wildcard origins are only
