@@ -1,0 +1,13 @@
+# Root requirements for container builds.
+# The directive's Dockerfile did `COPY requirements.txt .`, but only
+# backend/requirements.txt and frontend/requirements.txt existed, so the build
+# failed at that layer. This is the union the combined image needs.
+fastapi>=0.110
+uvicorn>=0.27
+pandas>=2.0
+requests>=2.31
+pytz>=2024.1
+yfinance>=0.2.40
+streamlit>=1.30
+pytest>=8.0
+httpx>=0.27

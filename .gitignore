@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.streamlit/
+.pytest_cache/

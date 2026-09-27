@@ -1,0 +1,106 @@
+# Decoupled execution runners.
+#
+# Corrections vs the directive draft:
+#   1. The commands were SILENT NO-OPS. `python -m backend.app.engine_macro` exited 0
+#      with no output because neither engine had a __main__ entry point -- the jobs
+#      would have reported success while ingesting nothing. Both engines now expose a
+#      `main()` that runs a single ingestion pass, honours the release-window /
+#      daily-roll guard, and exits non-zero on failure.
+#   2. `envFrom` was missing entirely, so the CronJobs had no SYSTEM_AUTH_TOKEN. Now
+#      consumed from the Secret.
+#   3. The runtime path: the image installs the app at /workspace/project (the Dockerfile
+#      WORKDIR), not /workspace. mountPath corrected to /workspace/project/data.
+#   4. `imagePullPolicy: IfNotPresent` plus `--force`-able entry points make reruns
+#      explicit rather than accidental.
+#
+# Scheduling: the cron expression is the coarse timer; the engine's own guard is the
+# authoritative release check (Friday 15:30 EST for macro, UTC daily roll for spatial).
+# Polling every 15 minutes lets the guard catch the exact window without a long job.
+# The macro schedule fires on the :00/:15/:30/:45 marks so it can react just after the
+# 15:30 EST release; it is a no-op on every other day.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: macro-ingestion-job
+  namespace: gold-intelligence
+spec:
+  schedule: "*/15 * * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid   # single writer; a long job never overlaps the next tick
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ingestor
+              image: institutional-macro-engine:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "engine_macro"]
+              workingDir: /workspace/project/backend/app
+              env:
+                - name: DATA_DIR
+                  value: /workspace/project/data
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: system-auth-credentials
+              volumeMounts:
+                - name: macro-data
+                  mountPath: /workspace/project/data
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits:   { cpu: "500m", memory: "512Mi" }
+          volumes:
+            - name: macro-data
+              persistentVolumeClaim:
+                claimName: macro-data-pvc
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spatial-mapping-job
+  namespace: gold-intelligence
+spec:
+  schedule: "*/15 * * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: mapper
+              image: institutional-macro-engine:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "engine_spatial"]
+              workingDir: /workspace/project/backend/app
+              env:
+                - name: DATA_DIR
+                  value: /workspace/project/data
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: system-auth-credentials
+              volumeMounts:
+                - name: spatial-data
+                  mountPath: /workspace/project/data
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits:   { cpu: "500m", memory: "512Mi" }
+          volumes:
+            - name: spatial-data
+              persistentVolumeClaim:
+                claimName: spatial-data-pvc

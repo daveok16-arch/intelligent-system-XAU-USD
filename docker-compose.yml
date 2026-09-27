@@ -1,0 +1,66 @@
+# Two-tier deployment: API/orchestrator + cockpit.
+#
+# Security posture:
+#   - SYSTEM_AUTH_TOKEN is required (${VAR:?} fails fast rather than shipping an
+#     unknown/blank credential). Provide it via an env file or a secret store;
+#     never bake it into the image.
+#   - Backend does not publish a host port; only the cockpit is exposed. The backend
+#     is reachable solely over the internal compose network. Uncomment `ports` on the
+#     backend ONLY if you are fronting it with a TLS-terminating reverse proxy.
+#   - TLS is expected to terminate upstream (NGINX/Traefik/ingress). These ports are
+#     plain HTTP and must not be exposed directly to the internet.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: institutional-macro-engine:latest
+    environment:
+      SYSTEM_AUTH_TOKEN: ${SYSTEM_AUTH_TOKEN:?SYSTEM_AUTH_TOKEN must be set}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      # Trust only the compose network's proxy hop by default.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      DATA_DIR: /workspace/project/data
+    volumes:
+      - engine-data:/workspace/project/data
+    # ports:
+    #   - "8000:8000"   # enable only behind a TLS-terminating proxy
+    restart: unless-stopped
+    networks: [engine]
+
+  cockpit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: institutional-macro-engine:latest
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      SYSTEM_AUTH_TOKEN: ${SYSTEM_AUTH_TOKEN:?SYSTEM_AUTH_TOKEN must be set}
+      API_BASE: http://backend:8000
+      DATA_DIR: /workspace/project/data
+    command:
+      - python
+      - -m
+      - streamlit
+      - run
+      - frontend/streamlit_app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+    ports:
+      - "8501:8501"
+    volumes:
+      - engine-data:/workspace/project/data
+    restart: unless-stopped
+    networks: [engine]
+
+networks:
+  engine:
+    driver: bridge
+
+volumes:
+  engine-data:
