@@ -12,10 +12,21 @@ import streamlit as st
 
 # Backend contract (FastAPI microservice). Override with BACKEND_URL env var.
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000/api/state")
+# Fallback repository lives in the shared data/ dir at the repo root.
 DATA_REPO = os.getenv(
     "MACRO_REPO_CSV",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "macro_intelligence_repository.csv"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "macro_intelligence_repository.csv"),
 )
+
+# Baseline used only when neither the backend nor the repository is reachable.
+FALLBACK_STATE = {
+    "fedwatch_dovish_probability": 74.50,
+    "sentiment_divergence_index": 0.68,
+    "system_gate_status": "OPEN",
+    "timestamp": "2026-09-25",
+    "spot_price": 2591.10,
+    "liquidity_sweep_floor": 2578.00,
+}
 
 # Set professional terminal configurations
 st.set_page_config(page_title="Institutional Macro Engine", layout="wide")
@@ -48,33 +59,45 @@ st.markdown("---")
 # In production this queries our FastAPI endpoint. A resilient fallback chain
 # keeps the cockpit rendering even when the backend is cycling.
 def load_state():
+    """Return cockpit state, preferring the live backend then the repository."""
+    source = "BASELINE DEFAULT"
     try:
         response = requests.get(BACKEND_URL, timeout=2)
         response.raise_for_status()
-        backend_data = response.json()
-        return (
-            float(backend_data["fedwatch_dovish_probability"]),
-            float(backend_data["sentiment_divergence_index"]),
-            str(backend_data["system_gate_status"]).upper(),
-            str(backend_data["timestamp"]),
-        )
+        d = response.json()
+        return {
+            "fedwatch_dovish_probability": float(d["fedwatch_dovish_probability"]),
+            "sentiment_divergence_index": float(d["sentiment_divergence_index"]),
+            "system_gate_status": str(d["system_gate_status"]).upper(),
+            "timestamp": str(d["timestamp"]),
+            "spot_price": float(d["spot_price"]),
+            "liquidity_sweep_floor": float(d["liquidity_sweep_floor"]),
+        }, "LIVE BACKEND"
     except Exception:
         pass
 
     try:
         df = pd.read_csv(DATA_REPO)
         latest = df.iloc[-1]
-        return (
-            float(latest["fedwatch_dovish_prob"]),
-            float(latest["SDI"]),
-            str(latest["MACRO_GATE"]).upper(),
-            str(latest["week_ending_date"]),
-        )
+        return {
+            "fedwatch_dovish_probability": float(latest["fedwatch_dovish_prob"]),
+            "sentiment_divergence_index": float(latest["SDI"]),
+            "system_gate_status": str(latest["MACRO_GATE"]).upper(),
+            "timestamp": str(latest["week_ending_date"]),
+            "spot_price": float(latest["spot_price"]),
+            "liquidity_sweep_floor": float(latest["liquidity_sweep_floor"]),
+        }, "DATA REPOSITORY"
     except Exception:
-        return 74.50, 0.68, "OPEN", "2026-09-25"
+        return dict(FALLBACK_STATE), source
 
 
-fedwatch_prob, sdi_score, gate_status, timestamp = load_state()
+state, data_source = load_state()
+fedwatch_prob = state["fedwatch_dovish_probability"]
+sdi_score = state["sentiment_divergence_index"]
+gate_status = state["system_gate_status"]
+timestamp = state["timestamp"]
+spot_price = state["spot_price"]
+sweep_floor = state["liquidity_sweep_floor"]
 
 
 # --- RENDER COCKPIT LAYOUT BLOCKS ---
@@ -129,13 +152,16 @@ with col2:
     )
 
 with col3:
+    dist = ((spot_price - sweep_floor) / sweep_floor * 100.0) if sweep_floor else 0.0
+    dist_color = "#238636" if dist > 0 else "#da3633"
     st.markdown(
-        """
+        f"""
         <div class="metric-card">
             <h4>📍 SPATIAL MARKET BOUNDARY</h4>
             <p>Target Liquidity Sweep Floor</p>
-            <h2>$2,578.00</h2>
-            <p style="color: #58a6ff;">CURRENT SPOT: $2,591.10</p>
+            <h2>${sweep_floor:,.2f}</h2>
+            <p style="color: #58a6ff;">CURRENT SPOT: ${spot_price:,.2f}</p>
+            <p style="color: {dist_color};">DISTANCE: {dist:+.2f}%</p>
         </div>
     """,
         unsafe_allow_html=True,
@@ -143,10 +169,11 @@ with col3:
 
 st.markdown("---")
 st.markdown("### 📈 Live Execution Analytics Mapping")
-# Mock vector matrix tracking the unified execution curve, anchored near spot.
+# Illustrative vector matrix anchored to the live spot price from the backend.
 rng = np.random.default_rng(42)
 chart_data = pd.DataFrame(
-    rng.standard_normal((20, 2)) * 5 + 2591.10,
+    rng.standard_normal((20, 2)) * 5 + spot_price,
     columns=["Actual Gold Price", "Strategy Trailing Stop Level"],
 )
 st.line_chart(chart_data)
+st.caption(f"Data source: {data_source}")
