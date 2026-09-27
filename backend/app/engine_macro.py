@@ -42,6 +42,14 @@ FED_TARGET_SERIES = os.getenv("FED_TARGET_SERIES", "DFEDTARU")
 TWO_YEAR_SERIES = os.getenv("TWO_YEAR_SERIES", "DGS2")
 HTTP_TIMEOUT = float(os.getenv("MACRO_HTTP_TIMEOUT", "15"))
 
+# SDI reference window. The percentile must be measured against a FIXED window, not
+# whatever rows happen to be in a given batch, otherwise the newest week's SDI moves
+# as the window rolls even when positioning is unchanged -- making readings
+# incomparable across time. 52 weeks = one year of CFTC positioning.
+SDI_REFERENCE_WEEKS = int(os.getenv("SDI_REFERENCE_WEEKS", "52"))
+# How many recent weeks are written to the repository on each run.
+SDI_PERSIST_WEEKS = int(os.getenv("SDI_PERSIST_WEEKS", "4"))
+
 # DATA_DIR must be honoured here: every other module (engine_spatial, main.py,
 # orchestrator.py) resolves the repository directory through it. Ignoring it here meant
 # the macro writer could target a different directory from the one the API reads,
@@ -152,13 +160,14 @@ class InstitutionalDataIngestor:
         return out
 
     # --- Source 2: institutional fund flow --------------------------------------
-    def ingest_institutional_fund_flow(self, weeks=4):
-        """Pillar 2. Return the multi-week COT positioning series (Directive 01 contract).
+    def ingest_institutional_fund_flow(self, weeks=None):
+        """Pillar 2. Return the COT positioning series (Directive 01 contract).
 
-        Emits the fields the directive named: Large_Spec_Net and Commercial_Net, over a
-        configurable weekly lookback so the SDI is computed across a real window rather
-        than a single snapshot.
+        Emits the fields the directive named: Large_Spec_Net and Commercial_Net.
+        Defaults to the full SDI reference window (52 weeks) so the percentile basis is
+        fixed; callers may pass a smaller `weeks` for tests or narrow views.
         """
+        weeks = weeks or SDI_REFERENCE_WEEKS
         params = {
             "$where": f"cftc_contract_market_code='{GOLD_COT_CONTRACT}'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
@@ -248,15 +257,16 @@ class InstitutionalDataIngestor:
             raise ValueError("every COT week lacked a macro reading; nothing to persist")
 
         # SDI (Directive 01 definition): commercial accumulation strength less the retail
-        # long-placement bias, where accumulation strength is the commercial net
-        # positioning expressed as a percentile *relative to neutral*: a commercial net
-        # at the bullish extreme maps to 1.0, neutral to 0.5, the bearish extreme to 0.0.
-        # Retail ratio comes from a separate sentiment feed and is not in the COT tape,
-        # so that bias term is neutral (0.0) here; the institutional component is real.
+        # long-placement bias. Accumulation strength is the commercial net expressed as a
+        # percentile across the FULL reference window (52 weeks), so a given positioning
+        # reading always maps to the same SDI regardless of batch size. Computing it over
+        # only the rows in one batch made the value move as the window rolled.
+        # Retail ratio comes from a separate sentiment feed that is not in the COT tape,
+        # so that bias term is neutral (0.0); the institutional component is real.
         comm = unified["Commercial_Net"]
         comm_min, comm_max = comm.min(), comm.max()
         if comm_max != comm_min:
-            pct = (comm - comm_min) / (comm_max - comm_min)          # 0..1 across the window
+            pct = (comm - comm_min) / (comm_max - comm_min)          # 0..1 over the window
         else:
             pct = pd.Series(0.5, index=unified.index)
         unified["SDI"] = ((pct - 0.5) + 0.5).round(4)
@@ -300,6 +310,9 @@ class InstitutionalDataIngestor:
             }
             for _, r in unified.iterrows()
         ]
+        # Persist only the most recent weeks; the percentile above was computed over the
+        # full reference window, so trimming the written rows does not change any value.
+        rows = rows[-SDI_PERSIST_WEEKS:]
         self._append_rows(rows)
 
         latest = rows[-1]
