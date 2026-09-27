@@ -22,7 +22,6 @@ Directive 06 corrections, each verified against the live container:
 """
 
 import os
-from typing import Optional
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, status
@@ -167,19 +166,13 @@ def _latest_macro_state():
 
 
 @app.get("/api/state")
-def get_state(
-    force_gate: Optional[str] = Query(
-        default=None, description="Testing override for gate status: 'OPEN' or 'CLOSED'."
-    ),
-):
-    """Legacy state route retained for the existing cockpit frontend."""
-    state = _latest_macro_state()
-    if force_gate:
-        gate = force_gate.upper()
-        if gate not in {"OPEN", "CLOSED"}:
-            raise HTTPException(status_code=400, detail="force_gate must be OPEN or CLOSED")
-        state["system_gate_status"] = gate
-    return JSONResponse(state)
+def get_state():
+    """Legacy state route retained for the existing cockpit frontend.
+
+    The `force_gate` test override has been removed: it allowed any caller to flip
+    the gate banner, which is a presentation-integrity hazard on a decision surface.
+    """
+    return JSONResponse(_latest_macro_state())
 
 
 @app.post("/api/refresh")
@@ -198,9 +191,28 @@ def get_spot():
 
 @app.get("/api/history")
 def get_history(
-    range_: str = Query(default="1mo", alias="range", pattern=r"^\d+(d|mo|y)$"),
-    interval: str = Query(default="1d", pattern=r"^\d+(m|h|d|wk|mo)$"),
+    range_: str = Query(
+        ...,
+        alias="range",
+        pattern=r"^\d+(d|mo|y)$",
+        description="Required. Window such as 5d, 1mo, 3mo, 1y.",
+    ),
+    interval: str = Query(
+        ...,
+        pattern=r"^\d+(m|h|d|wk|mo)$",
+        description="Required. Bar interval such as 1d, 1h, 15m, 1wk.",
+    ),
 ):
+    """Price history. Both parameters are required and range-bounded so callers
+    cannot request arbitrary upstream windows."""
+    # Bound the range so a caller cannot request an unbounded upstream scrape.
+    allowed_ranges = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"}
+    allowed_intervals = {"1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo"}
+    if range_ not in allowed_ranges:
+        raise HTTPException(status_code=422, detail=f"range must be one of {sorted(allowed_ranges)}")
+    if interval not in allowed_intervals:
+        raise HTTPException(status_code=422, detail=f"interval must be one of {sorted(allowed_intervals)}")
+
     history = market_data.get_history(range_, interval)
     if not history:
         raise HTTPException(status_code=503, detail="history feed unavailable")

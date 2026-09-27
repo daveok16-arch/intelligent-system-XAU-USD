@@ -51,9 +51,15 @@ def test_state_exposes_spatial_and_market_fields(client):
     assert body["market_spot"] == pytest.approx(4286.2)
 
 
-def test_force_gate_override_and_validation(client):
-    assert client.get("/api/state?force_gate=closed").json()["system_gate_status"] == "CLOSED"
-    assert client.get("/api/state?force_gate=bogus").status_code == 400
+def test_force_gate_override_removed(client):
+    """Directive 09: the gate-flip test hook must no longer exist.
+
+    A query param that can silently alter a decision surface is a hazard; passing it
+    must be ignored (and must never change the reported gate).
+    """
+    baseline = client.get("/api/state").json()["system_gate_status"]
+    tampered = client.get("/api/state?force_gate=CLOSED").json()["system_gate_status"]
+    assert tampered == baseline
 
 
 def test_health(client):

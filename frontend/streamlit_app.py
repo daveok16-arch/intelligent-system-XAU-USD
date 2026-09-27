@@ -84,10 +84,10 @@ st.markdown("---")
 
 
 # --- loading helpers -------------------------------------------------------------
-def _get_json(url, timeout=4):
+def _get_json(url, params=None, timeout=4):
     """Return parsed JSON or None. Never raises into the render path."""
     try:
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except Exception:
@@ -162,7 +162,8 @@ def load_spatial():
 
 
 def load_history():
-    data = _get_json(HISTORY_URL, timeout=8)
+    """History is a hardened endpoint: both range and interval are required."""
+    data = _get_json(HISTORY_URL, params={"range": "1mo", "interval": "1d"}, timeout=8)
     return data if data and data.get("points") else None
 
 

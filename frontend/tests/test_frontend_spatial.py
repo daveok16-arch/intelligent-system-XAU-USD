@@ -23,7 +23,7 @@ import streamlit_app as app  # noqa: E402
 
 # --- fallback chain ---------------------------------------------------------------
 def test_macro_prefers_live_v1(monkeypatch):
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: {
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: {
         "timestamp": "2026-09-22",
         "fedwatch_dovish_probability": 14.93,
         "sentiment_divergence_index": 0.5471,
@@ -45,7 +45,7 @@ def test_macro_falls_back_to_repository_when_backend_absent(monkeypatch, tmp_pat
          "MACRO_GATE": "CLOSED", "spot_price": 2570.4, "liquidity_sweep_floor": 2578.0, "source": "SEED"},
     ]).to_csv(repo, index=False)
 
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: None)
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: None)
     monkeypatch.setattr(app, "MACRO_REPO", str(repo))
 
     state, source = app.load_macro_state()
@@ -54,7 +54,7 @@ def test_macro_falls_back_to_repository_when_backend_absent(monkeypatch, tmp_pat
 
 
 def test_macro_baseline_when_nothing_available(monkeypatch):
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: None)
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: None)
     monkeypatch.setattr(app, "MACRO_REPO", "/nonexistent/macro.csv")
     state, source = app.load_macro_state()
     assert source == "MACRO BASELINE UNAVAILABLE"
@@ -62,7 +62,7 @@ def test_macro_baseline_when_nothing_available(monkeypatch):
 
 
 def test_spatial_prefers_live_v1(monkeypatch):
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: {
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: {
         "date": "2026-09-25", "three_day_high": 4414.10, "three_day_low": 4278.30,
         "sweep_floor": 4276.80, "atr_14": 98.86, "source": "YFINANCE_GC=F",
     })
@@ -80,7 +80,7 @@ def test_spatial_falls_back_to_repository(monkeypatch, tmp_path):
          "Sweep_Floor": 4309.2, "ATR_14": 104.87, "Source": "YFINANCE_GC=F"},
     ]).to_csv(repo, index=False)
 
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: None)
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: None)
     monkeypatch.setattr(app, "SPATIAL_REPO", str(repo))
 
     spatial, source = app.load_spatial()
@@ -90,7 +90,7 @@ def test_spatial_falls_back_to_repository(monkeypatch, tmp_path):
 
 
 def test_spatial_baseline_when_nothing_available(monkeypatch):
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: None)
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: None)
     monkeypatch.setattr(app, "SPATIAL_REPO", "/nonexistent/spatial.csv")
     spatial, source = app.load_spatial()
     assert source == "SPATIAL BASELINE UNAVAILABLE"
@@ -103,7 +103,7 @@ def test_malformed_live_payload_falls_through_to_repository(monkeypatch, tmp_pat
     pd.DataFrame([{"Date": "2026-09-25", "Three_Day_High": 4414.1, "Three_Day_Low": 4278.3,
                    "Sweep_Floor": 4276.8, "ATR_14": 98.86, "Source": "YFINANCE_GC=F"}]).to_csv(repo, index=False)
 
-    monkeypatch.setattr(app, "_get_json", lambda url, timeout=4: {"date": "2026-09-25"})  # incomplete
+    monkeypatch.setattr(app, "_get_json", lambda url, params=None, timeout=4: {"date": "2026-09-25"})  # incomplete
     monkeypatch.setattr(app, "SPATIAL_REPO", str(repo))
     spatial, source = app.load_spatial()
     assert source == "LOCAL SPATIAL REPOSITORY"

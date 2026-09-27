@@ -37,7 +37,11 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import pandas as pd
+import pytz
 import requests
+
+EST_TZ = pytz.timezone("US/Eastern")
 
 # --- path anchoring (no CWD dependence) ------------------------------------------
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,6 +65,86 @@ HEALTH_MAX_RETRIES = int(os.getenv("HEALTH_MAX_RETRIES", "5"))
 HEALTH_INTERVAL = float(os.getenv("HEALTH_INTERVAL", "1.0"))
 MACRO_INTERVAL = int(os.getenv("CRON_INTERVAL_SECONDS", "60"))
 SPATIAL_INTERVAL = int(os.getenv("SPATIAL_INTERVAL_SECONDS", "60"))
+
+
+# --- production scheduling -------------------------------------------------------
+def _coerce_utc(now=None):
+    """Return a tz-aware UTC datetime. Naive input is assumed UTC."""
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        return now_utc.replace(tzinfo=timezone.utc)
+    return now_utc.astimezone(timezone.utc)
+
+
+def should_trigger_weekly_macro(repo_path, now=None, clock_ok=True):
+    """True only when the Friday 15:30 EST release window has opened and this
+    calendar week is not already present in the repository.
+
+    `clock_ok=False` simulates an unparseable system clock/timezone: the scheduler
+    then blocks (returns False) rather than risk computing against a bad clock.
+    """
+    if not clock_ok:
+        print("⚠️ [SCHEDULER] Timezone/clock anomaly — blocking macro trigger (fail-safe).")
+        return False
+
+    now_est = _coerce_utc(now).astimezone(EST_TZ)
+
+    # Before the Friday cut-off, and Mon-Thu, the week's tape is not yet released.
+    if now_est.weekday() == 4 and now_est < now_est.replace(hour=15, minute=30, second=0, microsecond=0):
+        return False
+    if now_est.weekday() < 4:
+        return False
+
+    if not os.path.exists(repo_path) or os.path.getsize(repo_path) == 0:
+        return True
+
+    try:
+        df = pd.read_csv(repo_path)
+        if df.empty or "week_ending_date" not in df.columns:
+            # Unreadable/empty repository: a refresh is idempotent and will normalise
+            # the file, so triggering is the self-healing choice.
+            return True
+        parsed = pd.to_datetime(df["week_ending_date"], errors="coerce").dropna()
+        if parsed.empty:
+            return True
+        latest = parsed.max()
+        if latest.tzinfo is not None:
+            latest = latest.tz_convert("UTC")
+        else:
+            latest = pytz.utc.localize(latest)
+        latest_est = latest.astimezone(EST_TZ)
+        # ISO year-week comparison is robust across month/year boundaries.
+        if latest_est.isocalendar()[:2] == now_est.isocalendar()[:2]:
+            return False  # already synchronized this week
+    except Exception as exc:
+        print(f"⚠️ [SCHEDULER] Weekly repo parse anomaly ({type(exc).__name__}: {exc}) — triggering refresh.")
+        return True
+    return True
+
+
+def should_trigger_daily_spatial(repo_path, now=None, clock_ok=True):
+    """Daily-roll cache guard: skip the network hit when the current UTC day is
+    already present on disk."""
+    if not clock_ok:
+        print("⚠️ [SCHEDULER] Timezone/clock anomaly — blocking spatial trigger (fail-safe).")
+        return False
+
+    if not os.path.exists(repo_path) or os.path.getsize(repo_path) == 0:
+        return True
+
+    try:
+        df = pd.read_csv(repo_path)
+        if df.empty or "Date" not in df.columns:
+            return True
+        parsed = pd.to_datetime(df["Date"], errors="coerce").dropna()
+        if parsed.empty:
+            return True
+        if parsed.max().date() >= _coerce_utc(now).date():
+            return False  # current daily block already cached on disk
+    except Exception as exc:
+        print(f"⚠️ [SCHEDULER] Spatial repo parse anomaly ({type(exc).__name__}: {exc}) — triggering refresh.")
+        return True
+    return True
 
 
 class MasterSystemOrchestrator:
@@ -99,7 +183,8 @@ class MasterSystemOrchestrator:
 
     # --- worker loops -------------------------------------------------------------
     def run_macro_loop(self):
-        """Isolated worker for macro gravity + fund flow. Retries with backoff."""
+        """Isolated worker. Polls every interval and runs only inside the Friday
+        15:30 EST release window, once per calendar week."""
         from engine_macro import InstitutionalDataIngestor
 
         director = InstitutionalDataIngestor(asset_symbol="XAU/USD")
@@ -107,12 +192,15 @@ class MasterSystemOrchestrator:
 
         while not self.shutdown_signal.is_set():
             try:
-                print(f"📡 [MACRO ENGINE] Syncing macro-gravity loops at {datetime.now(timezone.utc)}")
-                director.synthesize_sentiment_divergence(
-                    director.ingest_weekly_macro_gravity(),
-                    director.ingest_institutional_fund_flow(),
-                )
-                backoff = 5
+                if should_trigger_weekly_macro(self.macro_repo):
+                    print(f"📡 [MACRO ENGINE] Weekly release window open; syncing at {datetime.now(timezone.utc)}")
+                    director.synthesize_sentiment_divergence(
+                        director.ingest_weekly_macro_gravity(),
+                        director.ingest_institutional_fund_flow(),
+                    )
+                    backoff = 5
+                else:
+                    print("⏸️ [MACRO ENGINE] Outside release window or week already synced; idle.")
             except Exception as exc:
                 print(f"⚠️ [MACRO WORKER EXCEPTION] Typed thread error caught: {type(exc).__name__}: {exc}")
                 # Cooling period before retry; never kills the application context.
@@ -123,7 +211,8 @@ class MasterSystemOrchestrator:
             self.shutdown_signal.wait(timeout=MACRO_INTERVAL)
 
     def run_spatial_loop(self):
-        """Isolated worker for structural boundary mapping. Retries with backoff."""
+        """Isolated worker. Enforces a daily-roll cache guard so a day already on
+        disk is served without any network scrape."""
         from engine_spatial import SpatialBoundaryEngine
 
         spatial_engine = SpatialBoundaryEngine(ticker="GC=F")
@@ -131,9 +220,12 @@ class MasterSystemOrchestrator:
 
         while not self.shutdown_signal.is_set():
             try:
-                print(f"⚡ [SPATIAL ENGINE] Triggering daily boundary calculations at {datetime.now(timezone.utc)}")
-                spatial_engine.execute_pipeline()
-                backoff = 5
+                if should_trigger_daily_spatial(self.spatial_repo):
+                    print(f"⚡ [SPATIAL ENGINE] Daily roll open; mapping boundaries at {datetime.now(timezone.utc)}")
+                    spatial_engine.execute_pipeline()
+                    backoff = 5
+                else:
+                    print("⏸️ [SPATIAL ENGINE] Current daily block already cached; skipping network scrape.")
             except Exception as exc:
                 print(f"⚠️ [SPATIAL WORKER EXCEPTION] Typed thread error caught: {type(exc).__name__}: {exc}")
                 if self.shutdown_signal.wait(timeout=backoff):
