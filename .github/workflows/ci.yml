@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint (pyflakes)
+        run: |
+          pip install pyflakes
+          python -m pyflakes backend/ frontend/
+
+      - name: Check the committed history store is present and well-formed
+        # The store is committed so the dashboard has trend context on first clone.
+        # Validate its shape rather than refetching (CI has no market-data dependency).
+        run: python scripts/check_history.py
+
+      - name: Run tests
+        # Unit tests stub network calls; no live market data is required.
+        run: python -m pytest backend/tests frontend/tests -q
+
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint k8s/verify-pipeline.sh
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./k8s
+
+  compose:
+    name: Validate docker-compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: |
+          docker compose config -q || docker-compose config -q
+        env:
+          SYSTEM_AUTH_TOKEN: ci-validation-token
