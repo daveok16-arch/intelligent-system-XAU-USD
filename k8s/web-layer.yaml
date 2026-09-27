@@ -73,13 +73,13 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            - name: macro-data
+            - name: repository-data
               mountPath: /workspace/project/data
               readOnly: true   # readers cannot corrupt files
       volumes:
-        - name: macro-data
+        - name: repository-data
           persistentVolumeClaim:
-            claimName: macro-data-pvc
+            claimName: institutional-data-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -138,13 +138,13 @@ spec:
             requests: { cpu: "100m", memory: "256Mi" }
             limits:   { cpu: "500m", memory: "512Mi" }
           volumeMounts:
-            - name: macro-data
+            - name: repository-data
               mountPath: /workspace/project/data
               readOnly: true
       volumes:
-        - name: macro-data
+        - name: repository-data
           persistentVolumeClaim:
-            claimName: macro-data-pvc
+            claimName: institutional-data-pvc
 ---
 apiVersion: v1
 kind: Service

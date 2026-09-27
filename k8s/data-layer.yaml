@@ -2,49 +2,45 @@
 #
 # Corrections vs the directive draft:
 #   1. `ReadWriteMany` is not supported by most CSI drivers (EBS, GCE PD, and kind's
-#      local-path all refuse it), so the PVC would stay Pending forever. More
-#      importantly RWX is the wrong tool here: the design goal is a SINGLE writer.
-#   2. The draft had ONE PVC shared by both CronJobs, giving no writer isolation --
-#      macro and spatial could write concurrently. Each writer now has its own
-#      ReadWriteOnce PVC, enforcing the single-writer constraint at the storage layer
-#      rather than trusting wall-clock schedule separation.
+#      local-path all refuse it), so the PVC would stay Pending forever.
+#   2. The draft had ONE PVC shared by both CronJobs, giving no writer isolation.
 #   3. The Namespace was referenced by every object but never created.
 #   4. The Secret the workloads consume was never defined.
 #
-# Reader topology note: the API Deployment mounts the *macro* volume read-only. With
-# multiple API replicas (the HPA does this), a ReadWriteOnce volume cannot be mounted
-# by pods on different nodes. See the note in web-layer.yaml.
+# Storage topology (corrected): both writers publish into a SHARED repository volume
+# mounted at /workspace/project/data, each writing its own distinct file. A single
+# ReadWriteOnce volume is safe because exactly ONE writer pod is ever active at a
+# time (concurrencyPolicy: Forbid, and the two CronJobs write different files). This
+# avoids the multi-writer corruption the directive worried about while still letting
+# the read-only API and cockpit see BOTH repositories.
+#
+# (An earlier revision split this into two PVCs. That isolated the writers but broke
+#  the readers: the API could only see one file, so /api/v1/spatial-boundaries always
+#  returned 503. Readers must see every repository the API serves.)
+#
+# Reader topology: the API/cockpit mount this volume read-only. ReadWriteOnce means
+# all reader pods must be scheduled on the SAME node as the volume, so a multi-node
+# HPA fan-out is NOT supported by this topology -- use a shared read-only CSI volume
+# or object store before scaling across nodes.
 
 apiVersion: v1
 kind: Namespace
 metadata:
   name: gold-intelligence
 ---
-# Single-writer volume for the weekly macro repository.
+# Single shared repository volume. Distinct files per writer; at most one writer pod
+# is active at a time, so ReadWriteOnce is correct and sufficient.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: macro-data-pvc
+  name: institutional-data-pvc
   namespace: gold-intelligence
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
----
-# Single-writer volume for the daily spatial repository.
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: spatial-data-pvc
-  namespace: gold-intelligence
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
+      storage: 5Gi
 ---
 # Credential consumed by the CronJobs and the API via envFrom.
 #
@@ -64,3 +60,4 @@ metadata:
 type: Opaque
 stringData:
   SYSTEM_AUTH_TOKEN: "REPLACE_ME_NOT_A_REAL_TOKEN"
+
