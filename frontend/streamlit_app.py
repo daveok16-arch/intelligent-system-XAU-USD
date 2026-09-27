@@ -1,6 +1,25 @@
 """
 APPLICATION MODULE: FRONTEND COCKPIT HUD
 ROLE: RENDER INSTITUTIONAL DATA STREAMS FOR HUMAN APPROVAL
+
+Data linkage (Directive 07):
+  - Macro state   : GET /api/v1/macro-state        -> card 1 & 2, gate banner
+  - Spatial bounds: GET /api/v1/spatial-boundaries -> card 3 (sweep floor, ATR)
+  - Price history : GET /api/history               -> chart
+
+Each source degrades independently through a fallback chain:
+  live v1 backend -> local repository CSV -> last-known baseline.
+No source ever fabricates values; an unavailable panel says so rather than
+inventing a number.
+
+Directive 07 corrections applied:
+  1. The macro localization previously selected df.iloc[-1] (positional). It now
+     selects by max date, matching the backend, so out-of-order ingestion is safe.
+  2. The spatial card previously read `liquidity_sweep_floor` from the MACRO repo
+     (a stale seeded value) and mislabelled it as the spatial boundary. It now
+     consumes the real spatial matrix from /api/v1/spatial-boundaries.
+  3. The 15-pip label is corrected: $1.50 on gold is 150 pips at $0.01/pip, per the
+     standing interbank convention correction.
 """
 
 import os
@@ -9,32 +28,37 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# Backend contract (FastAPI microservice). Override with BACKEND_URL env var.
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000/api/state")
-HISTORY_API_URL = os.getenv("HISTORY_API_URL", "http://127.0.0.1:8000/api/history")
-# Fallback repository lives in the shared data/ dir at the repo root.
-DATA_REPO = os.getenv(
-    "MACRO_REPO_CSV",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "macro_intelligence_repository.csv"),
-)
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.getenv("DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
 
-# Baseline used only when neither the backend nor the repository is reachable.
-FALLBACK_STATE = {
-    "fedwatch_dovish_probability": 74.50,
-    "sentiment_divergence_index": 0.68,
-    "system_gate_status": "OPEN",
-    "timestamp": "2026-09-25",
-    "spot_price": 2591.10,
-    "liquidity_sweep_floor": 2578.00,
-    "market_spot": None,
-    "market_spot_source": None,
-    "market_spot_as_of": None,
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
+MACRO_STATE_URL = f"{API_BASE}/api/v1/macro-state"
+SPATIAL_URL = f"{API_BASE}/api/v1/spatial-boundaries"
+HISTORY_URL = f"{API_BASE}/api/history"
+
+MACRO_REPO = os.getenv("MACRO_REPO_CSV", os.path.join(_DATA_DIR, "macro_intelligence_repository.csv"))
+SPATIAL_REPO = os.getenv("SPATIAL_REPO_CSV", os.path.join(_DATA_DIR, "spatial_boundaries_repository.csv"))
+
+SWEEP_BUFFER_USD = 1.50  # 150 pips at $0.01/pip interbank spot convention
+
+# Last-resort baseline. Used only when neither the backend nor any repository answers.
+FALLBACK_MACRO = {
+    "timestamp": None,
+    "fedwatch_dovish_probability": None,
+    "sentiment_divergence_index": None,
+    "system_gate_status": None,
+}
+FALLBACK_SPATIAL = {
+    "date": None,
+    "three_day_high": None,
+    "three_day_low": None,
+    "sweep_floor": None,
+    "atr_14": None,
+    "source": None,
 }
 
-# Set professional terminal configurations
 st.set_page_config(page_title="Institutional Macro Engine", layout="wide")
 
-# Apply dark-themed CSS styling to mirror a Bloomberg or Reuters terminal layout
 st.markdown(
     """
     <style>
@@ -48,6 +72,7 @@ st.markdown(
         }
         .gate-open { color: #238636; font-weight: bold; font-size: 24px; }
         .gate-closed { color: #da3633; font-weight: bold; font-size: 24px; }
+        .stale { color: #d29922; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -58,114 +83,152 @@ st.subheader("Institutional Portfolio Management & Macro Intelligence Terminal")
 st.markdown("---")
 
 
-# --- DATA LINKAGE TO BACKEND MICROSERVICE ---
-# In production this queries our FastAPI endpoint. A resilient fallback chain
-# keeps the cockpit rendering even when the backend is cycling.
-def load_state():
-    """Return cockpit state, preferring the live backend then the repository."""
-    source = "BASELINE DEFAULT"
+# --- loading helpers -------------------------------------------------------------
+def _get_json(url, timeout=4):
+    """Return parsed JSON or None. Never raises into the render path."""
     try:
-        response = requests.get(BACKEND_URL, timeout=2)
-        response.raise_for_status()
-        d = response.json()
-        return {
-            "fedwatch_dovish_probability": float(d["fedwatch_dovish_probability"]),
-            "sentiment_divergence_index": float(d["sentiment_divergence_index"]),
-            "system_gate_status": str(d["system_gate_status"]).upper(),
-            "timestamp": str(d["timestamp"]),
-            "spot_price": float(d["spot_price"]),
-            "liquidity_sweep_floor": float(d["liquidity_sweep_floor"]),
-            "market_spot": d.get("market_spot"),
-            "market_spot_source": d.get("market_spot_source"),
-            "market_spot_as_of": d.get("market_spot_as_of"),
-        }, "LIVE BACKEND"
-    except Exception:
-        pass
-
-    try:
-        df = pd.read_csv(DATA_REPO)
-        latest = df.iloc[-1]
-        return {
-            "fedwatch_dovish_probability": float(latest["fedwatch_dovish_prob"]),
-            "sentiment_divergence_index": float(latest["SDI"]),
-            "system_gate_status": str(latest["MACRO_GATE"]).upper(),
-            "timestamp": str(latest["week_ending_date"]),
-            "spot_price": float(latest["spot_price"]),
-            "liquidity_sweep_floor": float(latest["liquidity_sweep_floor"]),
-            "market_spot": None,
-            "market_spot_source": None,
-            "market_spot_as_of": None,
-        }, "DATA REPOSITORY"
-    except Exception:
-        return dict(FALLBACK_STATE), source
-
-
-state, data_source = load_state()
-fedwatch_prob = state["fedwatch_dovish_probability"]
-sdi_score = state["sentiment_divergence_index"]
-gate_status = state["system_gate_status"]
-timestamp = state["timestamp"]
-spot_price = state["spot_price"]
-sweep_floor = state["liquidity_sweep_floor"]
-market_spot = state.get("market_spot")
-market_spot_as_of = state.get("market_spot_as_of")
-
-
-def load_history():
-    """Fetch real daily gold-futures history from the backend. None if unavailable."""
-    try:
-        resp = requests.get(HISTORY_API_URL, params={"range": "1mo", "interval": "1d"}, timeout=8)
+        resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except Exception:
         return None
 
 
-# --- RENDER COCKPIT LAYOUT BLOCKS ---
+def _latest_by_date(df, date_column):
+    """Select the latest row by max date, never by position."""
+    parsed = pd.to_datetime(df[date_column], errors="coerce")
+    df = df.assign(_parsed=parsed).dropna(subset=["_parsed"])
+    if df.empty:
+        raise ValueError("no parseable dates")
+    return df.loc[df["_parsed"].idxmax()]
 
-# Row 1: High Level System Status Banner
+
+def load_macro_state():
+    """Macro state via v1 backend -> macro repository -> baseline."""
+    live = _get_json(MACRO_STATE_URL)
+    if live:
+        try:
+            return {
+                "timestamp": str(live["timestamp"]),
+                "fedwatch_dovish_probability": float(live["fedwatch_dovish_probability"]),
+                "sentiment_divergence_index": float(live["sentiment_divergence_index"]),
+                "system_gate_status": str(live["system_gate_status"]).upper(),
+            }, "LIVE /api/v1/macro-state"
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    try:
+        df = pd.read_csv(MACRO_REPO)
+        row = _latest_by_date(df, "week_ending_date")
+        return {
+            "timestamp": str(row["week_ending_date"]),
+            "fedwatch_dovish_probability": float(row["fedwatch_dovish_prob"]),
+            "sentiment_divergence_index": float(row["SDI"]),
+            "system_gate_status": str(row["MACRO_GATE"]).upper(),
+        }, "LOCAL MACRO REPOSITORY"
+    except Exception:
+        return dict(FALLBACK_MACRO), "MACRO BASELINE UNAVAILABLE"
+
+
+def load_spatial():
+    """Spatial boundaries via v1 backend -> spatial repository -> baseline."""
+    live = _get_json(SPATIAL_URL)
+    if live:
+        try:
+            return {
+                "date": str(live["date"]),
+                "three_day_high": float(live["three_day_high"]),
+                "three_day_low": float(live["three_day_low"]),
+                "sweep_floor": float(live["sweep_floor"]),
+                "atr_14": float(live["atr_14"]),
+                "source": str(live["source"]),
+            }, "LIVE /api/v1/spatial-boundaries"
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    try:
+        df = pd.read_csv(SPATIAL_REPO)
+        row = _latest_by_date(df, "Date")
+        return {
+            "date": str(row["Date"]),
+            "three_day_high": float(row["Three_Day_High"]),
+            "three_day_low": float(row["Three_Day_Low"]),
+            "sweep_floor": float(row["Sweep_Floor"]),
+            "atr_14": float(row["ATR_14"]),
+            "source": str(row["Source"]),
+        }, "LOCAL SPATIAL REPOSITORY"
+    except Exception:
+        return dict(FALLBACK_SPATIAL), "SPATIAL BASELINE UNAVAILABLE"
+
+
+def load_history():
+    data = _get_json(HISTORY_URL, timeout=8)
+    return data if data and data.get("points") else None
+
+
+macro, macro_source = load_macro_state()
+spatial, spatial_source = load_spatial()
+history = load_history()
+
+
+def _fmt(value, spec=",.2f", prefix="$"):
+    return f"{prefix}{value:{spec}}" if value is not None else "—"
+
+
+# --- Row 1: system status banner -------------------------------------------------
 st.markdown("### 🛡️ System Executive Control State")
+gate_status = macro["system_gate_status"]
 if gate_status == "OPEN":
     st.markdown(
         '<div class="gate-open">🟢 SYSTEM ENTER GATE OPEN — SEARCHING FOR SESSION LIQUIDITY SWEEPS</div>',
         unsafe_allow_html=True,
     )
-else:
+elif gate_status == "CLOSED":
     st.markdown(
         '<div class="gate-closed">🔴 SYSTEM ENTER GATE CLOSED — MACRO BIAS INACTIVE</div>',
         unsafe_allow_html=True,
     )
+else:
+    st.markdown(
+        '<div class="gate-closed">⚪ SYSTEM STATE UNAVAILABLE — NO AUTHORITATIVE MACRO RECORD</div>',
+        unsafe_allow_html=True,
+    )
 
-st.caption(f"Last Institutional Data Package Synchronized On: {timestamp}")
+st.caption(f"Last Institutional Data Package Synchronized On: {macro['timestamp'] or 'unavailable'}")
 st.markdown("##")
 
 
-# Row 2: Pillar Metric KPI Cards
+# --- Row 2: pillar KPI cards -----------------------------------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
+    dovish = macro["fedwatch_dovish_probability"]
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>🌐 GLOBAL MACRO GRAVITY</h4>
-            <p>CME FedWatch Dovish Pivot Prob</p>
-            <h2>{fedwatch_prob:.1f}%</h2>
-            <p style="color: #238636;">STATUS: REGIME ACCELERATING</p>
+            <p>Policy-Path Dovish Pivot Proxy</p>
+            <h2>{f"{dovish:.1f}%" if dovish is not None else "—"}</h2>
+            <p class="stale">FRED 2y-vs-policy logistic proxy (not CME FedWatch)</p>
         </div>
     """,
         unsafe_allow_html=True,
     )
 
 with col2:
-    # Visual color shift keyed to the mathematical threshold (> 0.50 = accumulation).
-    sdi_color = "#238636" if sdi_score > 0.50 else "#da3633"
-    sdi_label = "SMART MONEY ACCUMULATING" if sdi_score > 0.50 else "SMART MONEY DISTRIBUTING"
+    sdi = macro["sentiment_divergence_index"]
+    if sdi is None:
+        sdi_color, sdi_label, sdi_text = "#8b949e", "DATA UNAVAILABLE", "—"
+    else:
+        sdi_color = "#238636" if sdi > 0.50 else "#da3633"
+        sdi_label = "SMART MONEY ACCUMULATING" if sdi > 0.50 else "SMART MONEY DISTRIBUTING"
+        sdi_text = f"{sdi:+.2f}"
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>📊 INSTITUTIONAL FUND FLOW</h4>
             <p>Sentiment Divergence Index (SDI)</p>
-            <h2 style="color: {sdi_color};">{sdi_score:+.2f}</h2>
+            <h2 style="color: {sdi_color};">{sdi_text}</h2>
             <p style="color: {sdi_color};">{sdi_label}</p>
         </div>
     """,
@@ -173,39 +236,39 @@ with col2:
     )
 
 with col3:
-    dist = ((spot_price - sweep_floor) / sweep_floor * 100.0) if sweep_floor else 0.0
-    dist_color = "#238636" if dist > 0 else "#da3633"
-    if market_spot is not None:
-        live_line = f'<p style="color: #58a6ff;">LIVE SPOT: ${market_spot:,.2f}</p>'
-    else:
-        live_line = '<p style="color: #8b949e;">LIVE SPOT: feed unavailable</p>'
+    floor = spatial["sweep_floor"]
+    low = spatial["three_day_low"]
+    atr = spatial["atr_14"]
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>📍 SPATIAL MARKET BOUNDARY</h4>
-            <p>Target Liquidity Sweep Floor</p>
-            <h2>${sweep_floor:,.2f}</h2>
-            {live_line}
-            <p style="color: {dist_color};">STRATEGY SPOT: ${spot_price:,.2f} ({dist:+.2f}%)</p>
+            <p>3-Day Structural Low → Sweep Floor</p>
+            <h2>{_fmt(floor)}</h2>
+            <p style="color: #58a6ff;">3D LOW: {_fmt(low)} · BUFFER: ${SWEEP_BUFFER_USD:.2f} (150 pips)</p>
+            <p style="color: #8b949e;">ATR(14): {f"{atr:,.2f}" if atr is not None else "—"}</p>
         </div>
     """,
         unsafe_allow_html=True,
     )
 
+st.caption(
+    f"Macro source: {macro_source} · Spatial source: {spatial_source} · "
+    f"Spatial as of {spatial['date'] or 'unavailable'}"
+)
 st.markdown("---")
-st.markdown("### 📈 Gold Price History")
-history = load_history()
 
-if history and history.get("points"):
+
+# --- Row 3: price history --------------------------------------------------------
+st.markdown("### 📈 Gold Price History")
+if history:
     hist_df = pd.DataFrame(history["points"])
     hist_df["date"] = pd.to_datetime(hist_df["date"])
-    hist_df = hist_df.set_index("date")
-    hist_df = hist_df.rename(columns={"close": f"{history['symbol']} close (USD)"})
+    hist_df = hist_df.set_index("date").rename(columns={"close": f"{history['symbol']} close (USD)"})
     st.line_chart(hist_df)
     st.caption(
-        f"{history['instrument']} ({history['symbol']}) · {history['interval']} · "
-        f"{history['range']} · source: {history['source']} — futures proxy, not XAU/USD spot. "
-        f"Fetched {history['as_of']}."
+        f"{history['instrument']} ({history['symbol']}) · {history['interval']} · {history['range']} · "
+        f"source: {history['source']} — futures proxy, not XAU/USD spot. Fetched {history['as_of']}."
     )
 else:
     st.warning("Live price history feed unavailable — chart suppressed rather than showing synthetic data.")
