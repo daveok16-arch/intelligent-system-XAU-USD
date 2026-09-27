@@ -279,7 +279,88 @@ touches `Close`, the impact is **provably nil** for every conclusion that uses r
 No qualitative conclusion in this project changes. Two quantitative details (win rate
 −0.44pp, t −0.23) shift marginally in the direction of the existing verdict.
 
-## Conditional studies + walk-forward (the substantive finding)
+## Cross-asset replication + specificity (the strongest result)
+
+Two explanations would have invalidated the sweep volatility finding: *it is one series*
+and *it is just the leverage effect*. Both were tested directly.
+
+### Replication across four metals — the effect is a market property
+
+`backend/app/microstructure_crossasset.py`. Identical parameters across assets (no
+per-asset tuning, which would defeat the purpose). Copper is the strongest control: it
+shares no demand or positioning story with gold.
+
+| asset | bars | sweeps | all sweeps | t | high-vol sweeps | t |
+|---|---|---|---|---|---|---|
+| gold | 13,695 | 870 | 1.185× | 4.34 | **1.336×** | **5.89** |
+| silver | 13,694 | 931 | 1.136× | 3.11 | **1.290×** | **4.68** |
+| platinum | 13,683 | 951 | 1.095× | 2.32 | **1.184×** | **3.57** |
+| copper | 13,687 | 961 | 1.165× | 3.49 | **1.239×** | **4.25** |
+
+**4/4 assets positive, 4/4 significant, 0/4 negative, median 1.264×.** Including copper.
+The one-series explanation is dead.
+
+### Specificity — it beats the leverage effect too
+
+`backend/app/microstructure_specificity.py`. Volatility is higher after declines (the
+leverage effect), so "sweep" could just mean "price fell recently". Four increasing controls:
+
+| control | beats it? |
+|---|---|
+| C1 unconditional baseline | 4/4 |
+| C2 any ordinary down bar | 2/4 |
+| C3 **size-matched** dip (decile-matched on prior move) | **3/4** |
+| C4 pierced-but-not-rejected | see below |
+
+**C4 is the decisive control and its sign is the opposite of what volatility clustering
+predicts:**
+
+| asset | rejected sweep | pierced, not rejected | t |
+|---|---|---|---|
+| gold | 0.185% | 0.256% | **−2.81** |
+| silver | 0.366% | 0.528% | **−3.94** |
+| platinum | 0.352% | 0.425% | −1.85 |
+| copper | 0.242% | 0.297% | −0.97 |
+
+If the effect were merely "dips beget volatility", a pierced bar that *kept falling* would
+show equal or higher volatility — and it does. But a bar that pierced and was **rejected**
+shows *lower* subsequent movement than one that failed to recover. **The recovery is the
+informative part**, not the dip. That is a structural distinction, and it is the first
+evidence in this project that the rejection signature carries information.
+
+### Sub-period stability (addressing the shared-window concern)
+
+All four assets live in the same two years, so a common volatility regime could drive all of
+them. Checked per asset across 4 folds:
+
+| asset | folds > 1.0 | ratios |
+|---|---|---|
+| gold | 4/4 | 1.255, 1.259, 1.085, 1.137 |
+| silver | 4/4 | 1.205, 1.273, 1.028, 1.084 |
+| platinum | 3/4 | 1.267, 1.134, 1.128, 0.997 |
+| copper | 4/4 | 1.220, 1.108, 1.193, 1.156 |
+
+15 of 16 folds above 1.0. The shared-window explanation is weakened but **not eliminated** —
+a 2-year sample remains a 2-year sample, and this is the honest limit of the evidence.
+
+### What this is and is not
+
+**Is:** a replicated, specificity-tested, sub-period-stable statistical structure. A
+rejected sweep of a rolling swing low is followed by a larger absolute move than a matched
+ordinary dip, in four metals including an industrial one, with the opposite sign for
+non-rejected pierces.
+
+**Is not:** a directional signal (three studies, zero directional edge) and not yet a
+working volatility strategy. The economic magnitude on a 1-hour horizon is ~0.18–0.37% of
+price against ~0.16–0.39% unconditional — a 20–34% relative expansion. Useful for position
+sizing, stop placement and volatility targeting; not a standalone edge, and nothing here is
+wired to execution.
+
+**Honest residual limit:** 2 years of hourly data, all assets in the same window. A
+multi-year replication across a different regime would raise confidence materially and has
+not been done.
+
+## Conditional studies + walk-forward (the earlier finding)
 
 Following the volume and session leads, three further pre-registered studies were run.
 
