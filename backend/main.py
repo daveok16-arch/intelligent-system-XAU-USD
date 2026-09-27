@@ -23,6 +23,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import market_data
+
 DATA_REPO = os.getenv(
     "MACRO_REPO_CSV",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "macro_intelligence_repository.csv"),
@@ -74,6 +76,9 @@ def _latest_state():
     floor = float(latest["liquidity_sweep_floor"])
     distance_pct = ((spot - floor) / floor * 100.0) if floor else 0.0
 
+    # Live spot is advisory: the repository remains the authoritative state.
+    live = market_data.get_spot()
+
     return {
         "fedwatch_dovish_probability": float(latest["fedwatch_dovish_prob"]),
         "sentiment_divergence_index": float(latest["SDI"]),
@@ -82,6 +87,9 @@ def _latest_state():
         "spot_price": round(spot, 2),
         "liquidity_sweep_floor": round(floor, 2),
         "distance_to_floor_pct": round(distance_pct, 3),
+        "market_spot": live["price"] if live else None,
+        "market_spot_source": live["source"] if live else None,
+        "market_spot_as_of": live["as_of"] if live else None,
     }
 
 
@@ -111,3 +119,24 @@ def refresh():
     """Drop the cached repository so the next read picks up new data."""
     _read_repo.cache_clear()
     return {"status": "cache_cleared"}
+
+
+@app.get("/api/spot")
+def get_spot():
+    """Live XAU/USD spot price. 503 if the upstream feed is unreachable."""
+    spot = market_data.get_spot()
+    if not spot:
+        raise HTTPException(status_code=503, detail="live spot feed unavailable")
+    return spot
+
+
+@app.get("/api/history")
+def get_history(
+    range_: str = Query(default="1mo", alias="range", pattern=r"^\d+(d|mo|y)$"),
+    interval: str = Query(default="1d", pattern=r"^\d+(m|h|d|wk|mo)$"),
+):
+    """Daily gold-futures closes (proxy series). 503 if upstream is unavailable."""
+    history = market_data.get_history(range_, interval)
+    if not history:
+        raise HTTPException(status_code=503, detail="history feed unavailable")
+    return history

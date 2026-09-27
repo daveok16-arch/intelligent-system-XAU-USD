@@ -5,13 +5,13 @@ ROLE: RENDER INSTITUTIONAL DATA STREAMS FOR HUMAN APPROVAL
 
 import os
 
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
 # Backend contract (FastAPI microservice). Override with BACKEND_URL env var.
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000/api/state")
+HISTORY_API_URL = os.getenv("HISTORY_API_URL", "http://127.0.0.1:8000/api/history")
 # Fallback repository lives in the shared data/ dir at the repo root.
 DATA_REPO = os.getenv(
     "MACRO_REPO_CSV",
@@ -26,6 +26,9 @@ FALLBACK_STATE = {
     "timestamp": "2026-09-25",
     "spot_price": 2591.10,
     "liquidity_sweep_floor": 2578.00,
+    "market_spot": None,
+    "market_spot_source": None,
+    "market_spot_as_of": None,
 }
 
 # Set professional terminal configurations
@@ -72,6 +75,9 @@ def load_state():
             "timestamp": str(d["timestamp"]),
             "spot_price": float(d["spot_price"]),
             "liquidity_sweep_floor": float(d["liquidity_sweep_floor"]),
+            "market_spot": d.get("market_spot"),
+            "market_spot_source": d.get("market_spot_source"),
+            "market_spot_as_of": d.get("market_spot_as_of"),
         }, "LIVE BACKEND"
     except Exception:
         pass
@@ -86,6 +92,9 @@ def load_state():
             "timestamp": str(latest["week_ending_date"]),
             "spot_price": float(latest["spot_price"]),
             "liquidity_sweep_floor": float(latest["liquidity_sweep_floor"]),
+            "market_spot": None,
+            "market_spot_source": None,
+            "market_spot_as_of": None,
         }, "DATA REPOSITORY"
     except Exception:
         return dict(FALLBACK_STATE), source
@@ -98,6 +107,18 @@ gate_status = state["system_gate_status"]
 timestamp = state["timestamp"]
 spot_price = state["spot_price"]
 sweep_floor = state["liquidity_sweep_floor"]
+market_spot = state.get("market_spot")
+market_spot_as_of = state.get("market_spot_as_of")
+
+
+def load_history():
+    """Fetch real daily gold-futures history from the backend. None if unavailable."""
+    try:
+        resp = requests.get(HISTORY_API_URL, params={"range": "1mo", "interval": "1d"}, timeout=8)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
 
 
 # --- RENDER COCKPIT LAYOUT BLOCKS ---
@@ -154,26 +175,37 @@ with col2:
 with col3:
     dist = ((spot_price - sweep_floor) / sweep_floor * 100.0) if sweep_floor else 0.0
     dist_color = "#238636" if dist > 0 else "#da3633"
+    if market_spot is not None:
+        live_line = f'<p style="color: #58a6ff;">LIVE SPOT: ${market_spot:,.2f}</p>'
+    else:
+        live_line = '<p style="color: #8b949e;">LIVE SPOT: feed unavailable</p>'
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>📍 SPATIAL MARKET BOUNDARY</h4>
             <p>Target Liquidity Sweep Floor</p>
             <h2>${sweep_floor:,.2f}</h2>
-            <p style="color: #58a6ff;">CURRENT SPOT: ${spot_price:,.2f}</p>
-            <p style="color: {dist_color};">DISTANCE: {dist:+.2f}%</p>
+            {live_line}
+            <p style="color: {dist_color};">STRATEGY SPOT: ${spot_price:,.2f} ({dist:+.2f}%)</p>
         </div>
     """,
         unsafe_allow_html=True,
     )
 
 st.markdown("---")
-st.markdown("### 📈 Live Execution Analytics Mapping")
-# Illustrative vector matrix anchored to the live spot price from the backend.
-rng = np.random.default_rng(42)
-chart_data = pd.DataFrame(
-    rng.standard_normal((20, 2)) * 5 + spot_price,
-    columns=["Actual Gold Price", "Strategy Trailing Stop Level"],
-)
-st.line_chart(chart_data)
-st.caption(f"Data source: {data_source}")
+st.markdown("### 📈 Gold Price History")
+history = load_history()
+
+if history and history.get("points"):
+    hist_df = pd.DataFrame(history["points"])
+    hist_df["date"] = pd.to_datetime(hist_df["date"])
+    hist_df = hist_df.set_index("date")
+    hist_df = hist_df.rename(columns={"close": f"{history['symbol']} close (USD)"})
+    st.line_chart(hist_df)
+    st.caption(
+        f"{history['instrument']} ({history['symbol']}) · {history['interval']} · "
+        f"{history['range']} · source: {history['source']} — futures proxy, not XAU/USD spot. "
+        f"Fetched {history['as_of']}."
+    )
+else:
+    st.warning("Live price history feed unavailable — chart suppressed rather than showing synthetic data.")
