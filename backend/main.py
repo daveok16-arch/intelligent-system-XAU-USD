@@ -25,12 +25,14 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 
+import numpy as np
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 logger = logging.getLogger("institutional.api")
@@ -50,9 +52,15 @@ SPATIAL_REPO = os.getenv(
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
 
 app = FastAPI(
-    title="Institutional Macro & Liquidity Engine API",
-    description="Routing engine delivering validated multi-frequency macro and liquidity matrices.",
-    version="1.1.0",
+    title="Institutional Situational-Awareness API (XAU/USD)",
+    description=(
+        "Observational macro and positioning data for XAU/USD. "
+        "RESEARCH NOTICE: the indicator served here was backtested over 2000-2026 "
+        "(macro gate and spatial sweep) and shows no statistically significant trading "
+        "edge. It is situational-awareness data, not a buy/sell signal. "
+        "See docs/SYSTEMS_AUDIT_LOG.md."
+    ),
+    version="2.0.0",
 )
 
 # Read-only public data surface: GET only, no credentials. Wildcard origins are only
@@ -80,13 +88,78 @@ app.add_middleware(
 _BEARER_PREFIX = "bearer "
 _OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
 
-security_gate = HTTPBearer(auto_error=False)
+# --- brute-force protection -------------------------------------------------------
+# Repeated 401s from one origin indicate scanning. This is an in-process sliding window,
+# adequate for a single replica. With multiple API replicas each has its own counter, so
+# the effective limit multiplies by replica count -- for cluster-wide enforcement put the
+# limit at the ingress instead (nginx.ingress.kubernetes.io/limit-req).
+FAILED_AUTH_WINDOW_SECONDS = int(os.getenv("AUTH_FAILURE_WINDOW_SECONDS", "60"))
+FAILED_AUTH_MAX = int(os.getenv("AUTH_FAILURE_MAX", "10"))
+_RATE_LIMIT_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
+_failed_auth: dict[str, list[float]] = {}
+_auth_lock = threading.Lock()
+
+
+def _client_key(request):
+    """Best-effort client identity for rate limiting.
+
+    X-Forwarded-For is honoured only because uvicorn is launched with
+    --forwarded-allow-ips (loopback only by default), so the header is trusted solely
+    when set by our own ingress.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _record_failure(key):
+    now = time.time()
+    with _auth_lock:
+        history = [t for t in _failed_auth.get(key, []) if now - t < FAILED_AUTH_WINDOW_SECONDS]
+        history.append(now)
+        _failed_auth[key] = history
+        # Bound memory: drop keys whose windows have fully aged out.
+        if len(_failed_auth) > 4096:
+            for k in [k for k, v in _failed_auth.items() if not v or now - v[-1] > FAILED_AUTH_WINDOW_SECONDS]:
+                _failed_auth.pop(k, None)
+        return len(history)
+
+
+def _is_rate_limited(key):
+    now = time.time()
+    with _auth_lock:
+        history = [t for t in _failed_auth.get(key, []) if now - t < FAILED_AUTH_WINDOW_SECONDS]
+        _failed_auth[key] = history
+        return len(history) >= FAILED_AUTH_MAX
+
+
+def _clear_failures(key):
+    with _auth_lock:
+        _failed_auth.pop(key, None)
 
 
 def system_auth_token():
     """The configured bearer token, or None when none is provisioned."""
     token = (os.getenv("SYSTEM_AUTH_TOKEN") or "").strip()
     return token or None
+
+
+def accepted_tokens():
+    """All currently valid tokens: the primary plus any previous values during rotation.
+
+    SYSTEM_AUTH_TOKEN_PREVIOUS may hold a comma-separated list, so a token can be
+    rotated without dropping in-flight clients: set the new primary, move the old value
+    into PREVIOUS, deploy, then remove PREVIOUS once clients have moved over.
+    """
+    tokens = []
+    primary = system_auth_token()
+    if primary:
+        tokens.append(primary)
+    previous = (os.getenv("SYSTEM_AUTH_TOKEN_PREVIOUS") or "").strip()
+    if previous:
+        tokens.extend(t.strip() for t in previous.split(",") if t.strip())
+    return tokens
 
 
 def _generate_ephemeral_token():
@@ -99,14 +172,13 @@ def _generate_ephemeral_token():
     return token
 
 
-def _unauthorized(request, detail):
+def _unauthorized(request, detail, extra_headers=None):
     """Emit a spec-compliant challenge. Never leaks whether the token was near-correct."""
-    logger.warning("[AUTH] Rejected %s %s from %s", request.method, request.url.path, request.client.host if request.client else "unknown")
-    return JSONResponse(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        content={"detail": detail},
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    logger.warning("[AUTH] Rejected %s %s from %s", request.method, request.url.path, _client_key(request))
+    headers = {"WWW-Authenticate": "Bearer"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": detail}, headers=headers)
 
 
 @app.middleware("http")
@@ -115,18 +187,38 @@ async def enforce_bearer_auth(request: Request, call_next):
     if path in _OPEN_PATHS or request.method == "OPTIONS" or not path.startswith("/api/"):
         return await call_next(request)
 
-    configured = system_auth_token()
-    expected = configured or _ephemeral_token()
+    key = _client_key(request)
+    if _is_rate_limited(key):
+        logger.warning("[AUTH] Rate limited %s after %d failures in %ds",
+                       key, FAILED_AUTH_MAX, FAILED_AUTH_WINDOW_SECONDS)
+        return JSONResponse(
+            status_code=_RATE_LIMIT_STATUS,
+            content={"detail": "Too many failed authentication attempts. Retry later."},
+            headers={"Retry-After": str(FAILED_AUTH_WINDOW_SECONDS)},
+        )
+
+    expected_tokens = accepted_tokens() or [_ephemeral_token()]
 
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith(_BEARER_PREFIX):
+        _record_failure(key)
         return _unauthorized(request, "Missing or malformed Authorization header.")
 
     presented = header[len(_BEARER_PREFIX):].strip()
-    # Constant-time comparison resists timing oracles.
-    if not hmac.compare_digest(presented, expected):
-        return _unauthorized(request, "Invalid signature matrix. Institutional access denied.")
+    # Constant-time comparison against every accepted token; no early exit, so timing
+    # does not reveal which value matched.
+    matched = False
+    for candidate in expected_tokens:
+        if hmac.compare_digest(presented, candidate):
+            matched = True
 
+    if not matched:
+        count = _record_failure(key)
+        remaining = max(FAILED_AUTH_MAX - count, 0)
+        return _unauthorized(request, "Invalid signature matrix. Institutional access denied.",
+                             {"X-Auth-Failures-Remaining": str(remaining)})
+
+    _clear_failures(key)
     return await call_next(request)
 
 
@@ -227,7 +319,9 @@ def _latest_macro_state():
     )
     spot = float(record["spot_price"])
     floor = float(record["liquidity_sweep_floor"])
-    distance_pct = ((spot - floor) / floor * 100.0) if floor else 0.0
+    # A zero floor is not a valid boundary; reporting 0.0% distance would look like a
+    # real reading. Report null so the cockpit shows "—" instead of a plausible lie.
+    distance_pct = round(((spot - floor) / floor * 100.0), 3) if floor else None
     live = market_data.get_spot()
     return {
         "fedwatch_dovish_probability": float(record["fedwatch_dovish_prob"]),
@@ -236,7 +330,7 @@ def _latest_macro_state():
         "timestamp": record["_parsed_date"].strftime("%Y-%m-%d"),
         "spot_price": round(spot, 2),
         "liquidity_sweep_floor": round(floor, 2),
-        "distance_to_floor_pct": round(distance_pct, 3),
+        "distance_to_floor_pct": distance_pct,
         "data_source": str(record.get("source", "UNKNOWN")),
         "market_spot": live["price"] if live else None,
         "market_spot_source": live["source"] if live else None,
@@ -324,4 +418,209 @@ def get_spatial_boundaries():
         "sweep_floor": float(record["Sweep_Floor"]),
         "atr_14": float(record["ATR_14"]),
         "source": str(record["Source"]),
+    }
+
+
+# ------------------------------------------------------------------ history surface
+HISTORY_DIR = os.getenv(
+    "HISTORY_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "history")
+)
+_MACRO_HISTORY = os.path.join(HISTORY_DIR, "macro_history.csv")
+_PRICE_HISTORY = os.path.join(HISTORY_DIR, "price_history.csv")
+_SPATIAL_HISTORY = os.path.join(HISTORY_DIR, "spatial_history.csv")
+
+
+class TrendPoint(BaseModel):
+    date: str
+    value: float
+
+
+class MacroHistoryResponse(BaseModel):
+    as_of: str
+    points: int
+    total_points: int
+    history_start: str
+    sdi: TrendPoint
+    commercial_net_52w_low: float
+    commercial_net_52w_high: float
+    commercial_net: TrendPoint
+    commercial_net_change_4w: float
+    fedwatch_dovish_probability: TrendPoint
+    dovish_change_4w: float
+    system_gate_status: str
+    gate_open_weeks_52w: int
+    source: str
+
+
+class PriceHistoryResponse(BaseModel):
+    as_of: str
+    points: int
+    last_close: float
+    return_1w_pct: float
+    return_4w_pct: float
+    return_52w_pct: float
+    high_52w: float
+    low_52w: float
+    pct_from_52w_high: float
+    realized_vol_20d_annual_pct: float
+    source: str
+
+
+def _read_history_from_db(table, required):
+    """Read a history table from the database. Returns None if unavailable.
+
+    The API prefers the database (transactional, constraint-checked, network-reachable)
+    and falls back to the CSV files when no database is present, so both deployments
+    work during transition.
+    """
+    try:
+        import repository
+        from sqlalchemy import select
+    except Exception:
+        return None
+    try:
+        engine = repository.get_engine()
+        model = {
+            "macro_weekly": repository.MacroWeekly,
+            "price_daily": repository.PriceDaily,
+            "spatial_daily": repository.SpatialDaily,
+        }.get(table)
+        if model is None:
+            return None
+        with repository.Session(engine) as s:
+            rows = s.execute(select(model)).scalars().all()
+            if not rows:
+                return None
+            data = {c.name: [getattr(r, c.name) for r in rows] for c in model.__table__.columns}
+        df = pd.DataFrame(data)
+        # Normalise to the column names the rest of the API already uses.
+        renames = {"report_date": "date", "session_date": "date", "sdi": "SDI",
+                   "commercial_net": "Commercial_Net", "fedwatch_dovish_prob": "fedwatch_dovish_prob"}
+        df = df.rename(columns=renames)
+        df["_d"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["_d"]).sort_values("_d").reset_index(drop=True)
+        df["date"] = df["_d"].dt.strftime("%Y-%m-%d")
+        if df.empty or any(c not in df.columns for c in required):
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _read_history(path, required, table=None):
+    """Database first, CSV fallback. 503 only if neither source can serve the data."""
+    if table:
+        db = _read_history_from_db(table, required)
+        if db is not None and not db.empty:
+            return db
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="History store not built. Run: python -m backend.app.history_store",
+        )
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"History unreadable: {exc}")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"History missing columns: {missing}")
+    df["_d"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["_d"]).sort_values("_d").reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="History is empty.")
+    return df
+
+
+@app.get("/api/v1/macro-history", response_model=MacroHistoryResponse)
+def get_macro_history(limit: int = Query(default=260, ge=1, le=5000,
+                                         description="Most recent weekly rows to return.")):
+    """Multi-decade positioning + macro context: trend, range, and change over time."""
+    df = _read_history(_MACRO_HISTORY, ["date", "SDI", "Commercial_Net", "fedwatch_dovish_prob"], table="macro_weekly")
+    window = df.tail(limit)
+
+    latest = df.iloc[-1]
+
+    def _change(col, weeks=4):
+        if len(df) <= weeks:
+            return 0.0
+        return round(float(latest[col]) - float(df.iloc[-1 - weeks][col]), 4)
+
+    wk52 = df.tail(52)
+    low = float(latest["Commercial_Net_52w_Low"]) if pd.notna(latest.get("Commercial_Net_52w_Low")) else float(wk52["Commercial_Net"].min())
+    high = float(latest["Commercial_Net_52w_High"]) if pd.notna(latest.get("Commercial_Net_52w_High")) else float(wk52["Commercial_Net"].max())
+    return {
+        "as_of": str(latest["date"]),
+        "points": int(len(window)),
+        "total_points": int(len(df)),
+        "history_start": str(df["date"].iloc[0]),
+        "sdi": TrendPoint(date=str(latest["date"]), value=float(latest["SDI"])),
+        "commercial_net_52w_low": round(low, 2),
+        "commercial_net_52w_high": round(high, 2),
+        "commercial_net": TrendPoint(date=str(latest["date"]), value=float(latest["Commercial_Net"])),
+        "commercial_net_change_4w": _change("Commercial_Net"),
+        "fedwatch_dovish_probability": TrendPoint(date=str(latest["date"]), value=float(latest["fedwatch_dovish_prob"])),
+        "dovish_change_4w": _change("fedwatch_dovish_prob"),
+        "system_gate_status": str(latest["MACRO_GATE"]),
+        "gate_open_weeks_52w": int((wk52["MACRO_GATE"] == "OPEN").sum()),
+        "source": str(latest.get("source", "UNKNOWN")),
+    }
+
+
+@app.get("/api/v1/price-history", response_model=PriceHistoryResponse)
+def get_price_history():
+    """Trend and volatility context for the underlying."""
+    df = _read_history(_PRICE_HISTORY, ["date", "close"], table="price_daily")
+    latest = df.iloc[-1]
+    close = float(latest["close"])
+
+    def _ret(periods):
+        if len(df) <= periods:
+            return 0.0
+        past = float(df.iloc[-1 - periods]["close"])
+        return round((close - past) / past * 100, 2) if past else 0.0
+
+    wk52 = df.tail(252)
+    high52 = float(wk52["close"].max())
+    low52 = float(wk52["close"].min())
+    rets = df["close"].pct_change().dropna().tail(20)
+    vol = float(rets.std() * np.sqrt(252) * 100) if len(rets) > 1 else 0.0
+
+    return {
+        "as_of": str(latest["date"]),
+        "points": int(len(df)),
+        "last_close": round(close, 2),
+        "return_1w_pct": _ret(5),
+        "return_4w_pct": _ret(20),
+        "return_52w_pct": _ret(252),
+        "high_52w": round(high52, 2),
+        "low_52w": round(low52, 2),
+        "pct_from_52w_high": round((close - high52) / high52 * 100, 2) if high52 else 0.0,
+        "realized_vol_20d_annual_pct": round(vol, 2),
+        "source": str(latest.get("source", "UNKNOWN")),
+    }
+
+
+@app.get("/api/v1/series")
+def get_series(
+    name: str = Query(..., pattern=r"^(sdi|commercial_net|fedwatch|close|atr14|sweep_floor)$"),
+    limit: int = Query(default=260, ge=1, le=5000),
+):
+    """Dense time series for charting one named measure."""
+    mapping = {
+        "sdi": (_MACRO_HISTORY, "SDI"),
+        "commercial_net": (_MACRO_HISTORY, "Commercial_Net"),
+        "fedwatch": (_MACRO_HISTORY, "fedwatch_dovish_prob"),
+        "close": (_PRICE_HISTORY, "close"),
+        "atr14": (_SPATIAL_HISTORY, "ATR_14"),
+        "sweep_floor": (_SPATIAL_HISTORY, "Sweep_Floor"),
+    }
+    path, col = mapping[name]
+    df = _read_history(path, ["date", col]).tail(limit)
+    return {
+        "name": name,
+        "points": [{"date": str(d), "value": round(float(v), 4)}
+                   for d, v in zip(df["date"], df[col]) if pd.notna(v)],
     }

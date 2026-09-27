@@ -23,13 +23,13 @@ Methodology (all documented so the numbers are auditable):
 import os
 import sys
 import time
-from datetime import datetime, timezone
 
 import pandas as pd
 import requests
 
 # market_data lives one level up (backend/), shared with the API service.
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_DIR = os.path.dirname(_BACKEND_DIR)
 if _BACKEND_DIR not in sys.path:
     sys.path.append(_BACKEND_DIR)
 
@@ -42,18 +42,27 @@ FED_TARGET_SERIES = os.getenv("FED_TARGET_SERIES", "DFEDTARU")
 TWO_YEAR_SERIES = os.getenv("TWO_YEAR_SERIES", "DGS2")
 HTTP_TIMEOUT = float(os.getenv("MACRO_HTTP_TIMEOUT", "15"))
 
+# SDI reference window. The percentile must be measured against a FIXED window, not
+# whatever rows happen to be in a given batch, otherwise the newest week's SDI moves
+# as the window rolls even when positioning is unchanged -- making readings
+# incomparable across time. 52 weeks = one year of CFTC positioning.
+SDI_REFERENCE_WEEKS = int(os.getenv("SDI_REFERENCE_WEEKS", "52"))
+# How many recent weeks are written to the repository on each run.
+SDI_PERSIST_WEEKS = int(os.getenv("SDI_PERSIST_WEEKS", "4"))
+
+# DATA_DIR must be honoured here: every other module (engine_spatial, main.py,
+# orchestrator.py) resolves the repository directory through it. Ignoring it here meant
+# the macro writer could target a different directory from the one the API reads,
+# silently freezing the macro repository in any deployment that sets DATA_DIR.
+_DATA_DIR = os.getenv("DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
 REPO_PATH = os.getenv(
     "MACRO_REPO_CSV",
-    os.path.join(os.path.dirname(_BACKEND_DIR), "data", "macro_intelligence_repository.csv"),
+    os.path.join(_DATA_DIR, "macro_intelligence_repository.csv"),
 )
 
 # No custom User-Agent: FRED's edge stalls requests carrying the bot-style UA we
 # previously sent, while plain requests return in ~0.1s. Both feeds accept default headers.
 _UA = None
-
-
-def _clamp(value, low, high):
-    return max(low, min(high, value))
 
 
 def _get_with_retry(url, params, attempts=3, backoff=2.0):
@@ -71,121 +80,265 @@ def _get_with_retry(url, params, attempts=3, backoff=2.0):
     raise last_error
 
 
+def _bias_label(dovish):
+    """Map a dovish probability onto the descriptive band the directive used."""
+    if dovish >= 0.60:
+        return "DOVISH"
+    if dovish >= 0.50:
+        return "DOVISH_TILT"
+    if dovish <= 0.35:
+        return "HAWKISH"
+    return "NEUTRAL"
+
+
+def _as_frame(obj, date_alias):
+    """Coerce a DataFrame or legacy single-row dict into a frame, normalising the
+    date column onto the first name in `date_alias` so older callers keep working."""
+    df = obj if isinstance(obj, pd.DataFrame) else pd.DataFrame([obj])
+    for alias in date_alias[1:]:
+        if alias in df.columns and date_alias[0] not in df.columns:
+            df = df.rename(columns={alias: date_alias[0]})
+    return df
+
+
 class InstitutionalDataIngestor:
     def __init__(self, asset_symbol="XAU/USD"):
         self.asset_symbol = asset_symbol
 
     # --- Source 1: macro gravity -------------------------------------------------
-    def _fred_latest(self, series):
+    def _fred_series(self, series):
+        """Return the full FRED history as DataFrame[date, value].
+
+        Using the whole history (rather than only the latest observation) lets each COT
+        week be matched to the macro regime prevailing *at that time*, which is both
+        look-ahead-free and the only way the as-of join is meaningful.
+        """
         resp = _get_with_retry(FRED_URL, {"id": series})
-        rows = [line for line in resp.text.strip().splitlines() if line and "," in line]
-        for line in reversed(rows[1:]):
+        rows = []
+        for line in resp.text.strip().splitlines()[1:]:
+            if "," not in line:
+                continue
             date, value = line.split(",", 1)
             value = value.strip()
-            if value not in ("", ".", "NaN"):
-                return date.strip(), float(value)
-        raise ValueError(f"FRED series {series} returned no usable observations")
+            if value in ("", ".", "NaN"):
+                continue
+            rows.append({"date": date.strip(), "value": float(value)})
+        if not rows:
+            raise ValueError(f"FRED series {series} returned no usable observations")
+        return pd.DataFrame(rows)
 
-    def ingest_weekly_macro_gravity(self):
-        """Return the dovish-pivot proxy derived from the FRED policy path."""
-        target_date, target_rate = self._fred_latest(FED_TARGET_SERIES)
-        twoyr_date, twoyr_rate = self._fred_latest(TWO_YEAR_SERIES)
+    def ingest_weekly_macro_gravity(self, lookback_rows=None):
+        """Pillar 1. Return the dovish-pivot series as a DataFrame (Directive 01 contract).
 
-        # Logistic on the 2y-policy spread; 0.5pp spread ~= one logistic unit.
-        spread = twoyr_rate - target_rate
-        dovish = 1.0 / (1.0 + pow(2.718281828, spread / 0.5))
-        dovish = _clamp(dovish, 0.0, 1.0)
+        Columns: log_date, fedwatch_dovish_prob, policy_target_rate, two_year_yield,
+        central_bank_bias. The logistic proxy is computed per observation from the
+        prevailing 2y-vs-policy spread.
+        """
+        target = self._fred_series(FED_TARGET_SERIES).rename(columns={"value": "policy_target_rate"})
+        twoyr = self._fred_series(TWO_YEAR_SERIES).rename(columns={"value": "two_year_yield"})
 
-        return {
-            "asset_symbol": self.asset_symbol,
-            "fedwatch_dovish_prob": round(dovish * 100.0, 2),
-            "policy_target_rate": target_rate,
-            "two_year_yield": twoyr_rate,
-            "as_of": target_date,
-            "series_dates": {"target": target_date, "two_year": twoyr_date},
-            "methodology": "logistic proxy on 2y minus policy target (not CME FedWatch)",
-        }
+        merged = pd.merge_asof(
+            twoyr.assign(_d=pd.to_datetime(twoyr["date"])).sort_values("_d"),
+            target.assign(_d=pd.to_datetime(target["date"])).sort_values("_d"),
+            on="_d",
+            direction="backward",
+        ).dropna(subset=["policy_target_rate"])
+
+        merged["spread"] = merged["two_year_yield"] - merged["policy_target_rate"]
+        merged["fedwatch_dovish_prob"] = (
+            1.0 / (1.0 + pow(2.718281828, merged["spread"] / 0.5)) * 100.0
+        ).round(2)
+        merged["central_bank_bias"] = merged["fedwatch_dovish_prob"].apply(
+            lambda p: _bias_label(p / 100.0)
+        )
+        merged["log_date"] = merged["_d"].dt.strftime("%Y-%m-%d")
+
+        out = merged[["log_date", "fedwatch_dovish_prob", "policy_target_rate",
+                      "two_year_yield", "central_bank_bias"]].reset_index(drop=True)
+        if lookback_rows:
+            out = out.tail(lookback_rows).reset_index(drop=True)
+        return out
 
     # --- Source 2: institutional fund flow --------------------------------------
-    def ingest_institutional_fund_flow(self):
-        """Return net non-commercial positioning from the CME gold COT report."""
+    def ingest_institutional_fund_flow(self, weeks=None):
+        """Pillar 2. Return the COT positioning series (Directive 01 contract).
+
+        Emits the fields the directive named: Large_Spec_Net and Commercial_Net.
+        Defaults to the full SDI reference window (52 weeks) so the percentile basis is
+        fixed; callers may pass a smaller `weeks` for tests or narrow views.
+        """
+        weeks = weeks or SDI_REFERENCE_WEEKS
         params = {
             "$where": f"cftc_contract_market_code='{GOLD_COT_CONTRACT}'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
-            "$limit": "2",
+            "$limit": str(max(1, weeks)),
         }
         resp = _get_with_retry(COT_URL, params)
         rows = resp.json()
         if not rows:
             raise ValueError(f"no COT rows for contract {GOLD_COT_CONTRACT}")
 
-        latest = rows[0]
-        long_ = float(latest["noncomm_positions_long_all"])
-        short_ = float(latest["noncomm_positions_short_all"])
-        oi = float(latest["open_interest_all"])
-        net = long_ - short_
+        records = []
+        for row in rows:
+            long_ = float(row["noncomm_positions_long_all"])
+            short_ = float(row["noncomm_positions_short_all"])
+            comm_long = float(row["comm_positions_long_all"])
+            comm_short = float(row["comm_positions_short_all"])
+            oi = float(row["open_interest_all"])
+            records.append({
+                "week_ending_date": str(row.get("report_date_as_yyyy_mm_dd", ""))[:10],
+                "large_spec_longs": long_,
+                "large_spec_shorts": short_,
+                "commercial_longs": comm_long,
+                "commercial_shorts": comm_short,
+                "open_interest": oi,
+                "Large_Spec_Net": long_ - short_,
+                "Commercial_Net": comm_long - comm_short,
+            })
 
-        prior_net = None
-        if len(rows) > 1:
-            prior_net = float(rows[1]["noncomm_positions_long_all"]) - float(
-                rows[1]["noncomm_positions_short_all"]
-            )
+        df = pd.DataFrame(records).sort_values("week_ending_date").reset_index(drop=True)
 
-        return {
-            "market": latest.get("market_and_exchange_names"),
-            "report_date": str(latest.get("report_date_as_yyyy_mm_dd", ""))[:10],
-            "noncomm_long": long_,
-            "noncomm_short": short_,
-            "open_interest": oi,
-            "net_noncomm": net,
-            "net_change": (net - prior_net) if prior_net is not None else None,
-            "sdi_raw": round(net / oi, 6) if oi else 0.0,
+        # Latest-row convenience fields keep the existing single-snapshot consumers working.
+        latest = df.iloc[-1]
+        df.attrs["latest"] = {
+            "market": rows[0].get("market_and_exchange_names"),
+            "report_date": latest["week_ending_date"],
+            "noncomm_long": float(latest["large_spec_longs"]),
+            "noncomm_short": float(latest["large_spec_shorts"]),
+            "open_interest": float(latest["open_interest"]),
+            "net_noncomm": float(latest["Large_Spec_Net"]),
+            "sdi_raw": round(float(latest["Large_Spec_Net"]) / float(latest["open_interest"]), 6)
+            if latest["open_interest"] else 0.0,
         }
+        return df
 
     # --- Synthesis + persistence -------------------------------------------------
     def synthesize_sentiment_divergence(self, macro_df, cot_df):
-        """Combine both tapes into one repository row and append it to the CSV."""
-        sdi = float(cot_df["sdi_raw"])
-        dovish = float(macro_df["fedwatch_dovish_prob"]) / 100.0
+        """Alpha engine (Directive 01): join the macro tape to the positioning series,
+        compute the SDI for each week, apply the systemic gate, and persist every row.
 
-        # Gate opens only when fund flow is accumulating AND macro has a dovish tailwind.
-        gate = "OPEN" if (sdi > 0.50 and dovish > 0.50) else "CLOSED"
+        Defensive against both contracts: DataFrames (the directive's shape) and the
+        single-row dicts the first build used.
+        """
+        cot = _as_frame(cot_df, date_alias=("week_ending_date", "report_date"))
+        macro = _as_frame(macro_df, date_alias=("log_date", "as_of"))
+        if "log_date" not in macro.columns and "week_ending_date" in macro.columns:
+            macro = macro.rename(columns={"week_ending_date": "log_date"})
+        # A legacy single macro reading with no date can still pair with every COT week.
+        if "log_date" not in macro.columns:
+            macro["log_date"] = "1970-01-01"
 
-        # Spatial levels are strategy-owned; ingestion carries them forward.
+        # The directive joined on exact string equality, which silently yields an empty
+        # frame whenever the FRED and CFTC dates differ (they almost always do). Merge
+        # asof-style on parsed dates instead: each COT week takes the prevailing macro
+        # reading. merge_asof requires datetime/numeric keys, not strings.
+        cot = cot.assign(
+            _week=pd.to_datetime(cot["week_ending_date"], errors="coerce")
+        ).dropna(subset=["_week"]).sort_values("_week").reset_index(drop=True)
+        macro = macro.assign(
+            _macro=pd.to_datetime(macro["log_date"], errors="coerce")
+        ).dropna(subset=["_macro"]).sort_values("_macro").reset_index(drop=True)
+        unified = pd.merge_asof(cot, macro, left_on="_week", right_on="_macro")
+
+        if unified.empty:
+            raise ValueError("macro and COT tapes produced no joined rows")
+        if unified["fedwatch_dovish_prob"].isna().all():
+            raise ValueError("macro and COT tapes produced no joined rows "
+                             "(no macro reading available at or before any COT week)")
+
+        # A COT week with no prevailing macro reading cannot be gated. Drop it rather
+        # than writing a blank cell into the repository, which would be a silent hole.
+        before = len(unified)
+        unified = unified.dropna(subset=["fedwatch_dovish_prob"]).reset_index(drop=True)
+        dropped = before - len(unified)
+        if dropped:
+            print(f"⚠️ [SYNTHESIS] Dropped {dropped} COT week(s) with no macro reading.")
+        if unified.empty:
+            raise ValueError("every COT week lacked a macro reading; nothing to persist")
+
+        # SDI (Directive 01 definition): commercial accumulation strength less the retail
+        # long-placement bias. Accumulation strength is the commercial net expressed as a
+        # percentile across the FULL reference window (52 weeks), so a given positioning
+        # reading always maps to the same SDI regardless of batch size. Computing it over
+        # only the rows in one batch made the value move as the window rolled.
+        # Retail ratio comes from a separate sentiment feed that is not in the COT tape,
+        # so that bias term is neutral (0.0); the institutional component is real.
+        comm = unified["Commercial_Net"]
+        comm_min, comm_max = comm.min(), comm.max()
+        if comm_max != comm_min:
+            pct = (comm - comm_min) / (comm_max - comm_min)          # 0..1 over the window
+        else:
+            pct = pd.Series(0.5, index=unified.index)
+        unified["SDI"] = ((pct - 0.5) + 0.5).round(4)
+
+        dovish = unified["fedwatch_dovish_prob"] / 100.0
+        unified["MACRO_GATE"] = [
+            "OPEN" if (s > 0.50 and d > 0.50) else "CLOSED"
+            for s, d in zip(unified["SDI"], dovish)
+        ]
+
+        # Carry spatial levels forward; strategy owns them, ingestion does not invent them.
         if os.path.exists(REPO_PATH) and os.path.getsize(REPO_PATH) > 0:
             prior = pd.read_csv(REPO_PATH)
-            spot = float(prior.iloc[-1]["spot_price"])
-            floor = float(prior.iloc[-1]["liquidity_sweep_floor"])
+            prior = prior.assign(
+                _d=pd.to_datetime(prior["week_ending_date"], errors="coerce")
+            ).dropna(subset=["_d"])
+            latest_prior = prior.loc[prior["_d"].idxmax()]
+            spot = float(latest_prior["spot_price"])
+            floor = float(latest_prior["liquidity_sweep_floor"])
         else:
             live = market_data.get_spot()
-            spot = live["price"] if live else 0.0
-            floor = round(spot * 0.995, 2) if spot else 0.0
+            if not live or not live.get("price"):
+                # No prior levels and no live feed: refuse rather than persist a
+                # fabricated 0.0 price (which would also yield a 0.0 sweep floor).
+                raise ValueError(
+                    "no prior spatial levels and the live spot feed is unavailable; "
+                    "refusing to write a fabricated price"
+                )
+            spot = float(live["price"])
+            floor = round(spot * 0.995, 2)
 
-        row = {
-            "week_ending_date": cot_df["report_date"] or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "fedwatch_dovish_prob": round(dovish * 100.0, 2),
-            "SDI": round(sdi, 4),
-            "MACRO_GATE": gate,
-            "spot_price": spot,
-            "liquidity_sweep_floor": floor,
-            "source": "CFTC_COT",
-        }
-        self._append_row(row)
-        return row
+        rows = [
+            {
+                "week_ending_date": r["week_ending_date"],
+                "fedwatch_dovish_prob": float(r["fedwatch_dovish_prob"]),
+                "SDI": float(r["SDI"]),
+                "MACRO_GATE": r["MACRO_GATE"],
+                "spot_price": spot,
+                "liquidity_sweep_floor": floor,
+                "source": "CFTC_COT",
+            }
+            for _, r in unified.iterrows()
+        ]
+        # Persist only the most recent weeks; the percentile above was computed over the
+        # full reference window, so trimming the written rows does not change any value.
+        rows = rows[-SDI_PERSIST_WEEKS:]
+        self._append_rows(rows)
 
-    def _append_row(self, row):
+        latest = rows[-1]
+        print(f"🚨 [PIPELINE SUCCESS] -> {len(rows)} week(s) synthesized; latest "
+              f"{latest['week_ending_date']} SDI {latest['SDI']} gate {latest['MACRO_GATE']}.")
+        return latest
+
+    def _append_rows(self, rows):
+        """Idempotent, chronologically sorted batch write (one row per report week)."""
+        if not rows:
+            return
         os.makedirs(os.path.dirname(REPO_PATH), exist_ok=True)
-        df = pd.DataFrame([row])
+        fresh = pd.DataFrame(rows)
         if os.path.exists(REPO_PATH) and os.path.getsize(REPO_PATH) > 0:
             existing = pd.read_csv(REPO_PATH)
             if "source" not in existing.columns:
                 existing["source"] = "SEED"
-            # Idempotent: a re-run for the same week replaces rather than duplicates.
-            existing = existing[existing["week_ending_date"] != row["week_ending_date"]]
-            df = pd.concat([existing, df], ignore_index=True)
-        # Chronological order keeps the file readable; readers still select by max date.
-        df = df.sort_values("week_ending_date").reset_index(drop=True)
-        df.to_csv(REPO_PATH, index=False)
+            # Re-running a week replaces it rather than duplicating.
+            existing = existing[~existing["week_ending_date"].isin(fresh["week_ending_date"])]
+            fresh = pd.concat([existing, fresh], ignore_index=True)
+        fresh = fresh.sort_values("week_ending_date").reset_index(drop=True)
+        fresh.to_csv(REPO_PATH, index=False)
+
+    def _append_row(self, row):
+        """Single-row convenience wrapper retained for backward compatibility."""
+        self._append_rows([row])
 
 
 def main(argv=None):
