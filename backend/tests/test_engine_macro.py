@@ -211,7 +211,7 @@ def test_rerun_same_week_replaces_rather_than_duplicates(ingestor, monkeypatch):
 
 def test_spatial_levels_carried_forward(ingestor, monkeypatch):
     _patch_fred(monkeypatch)
-    first = ingestor.synthesize_sentiment_divergence(
+    ingestor.synthesize_sentiment_divergence(
         ingestor.ingest_weekly_macro_gravity(),
         ingestor.ingest_institutional_fund_flow(weeks=4),
     )
@@ -246,6 +246,29 @@ def test_rows_without_macro_reading_are_dropped_not_written_blank(ingestor, monk
     df = pd.read_csv(em.REPO_PATH)
     assert not df["fedwatch_dovish_prob"].isna().any()
     assert len(df) >= 1
+
+
+def test_refuses_to_fabricate_price_when_no_prior_and_feed_down(ingestor, monkeypatch):
+    """Regression: with an empty repository and the spot feed down, the engine wrote
+    spot_price=0.0 (and floor 0.0) and reported success -- a fabricated price."""
+    monkeypatch.setattr(em.market_data, "get_spot", lambda: None)
+    with pytest.raises(ValueError, match="fabricated price"):
+        ingestor.synthesize_sentiment_divergence(
+            ingestor.ingest_weekly_macro_gravity(),
+            ingestor.ingest_institutional_fund_flow(weeks=4),
+        )
+    assert not os.path.exists(em.REPO_PATH)  # nothing written
+
+
+def test_uses_live_spot_when_no_prior_repo_exists(ingestor, monkeypatch):
+    """With a live feed and no prior repository, the real price is used."""
+    monkeypatch.setattr(em.market_data, "get_spot", lambda: {"price": 4300.0})
+    row = ingestor.synthesize_sentiment_divergence(
+        ingestor.ingest_weekly_macro_gravity(),
+        ingestor.ingest_institutional_fund_flow(weeks=4),
+    )
+    assert row["spot_price"] == pytest.approx(4300.0)
+    assert row["liquidity_sweep_floor"] == pytest.approx(4300.0 * 0.995, abs=0.01)
 
 
 def test_empty_join_raises_rather_than_writing_nothing(ingestor, monkeypatch):

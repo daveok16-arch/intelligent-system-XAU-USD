@@ -27,10 +27,9 @@ import os
 import secrets
 
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 logger = logging.getLogger("institutional.api")
@@ -79,8 +78,6 @@ app.add_middleware(
 
 _BEARER_PREFIX = "bearer "
 _OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
-
-security_gate = HTTPBearer(auto_error=False)
 
 
 def system_auth_token():
@@ -227,7 +224,9 @@ def _latest_macro_state():
     )
     spot = float(record["spot_price"])
     floor = float(record["liquidity_sweep_floor"])
-    distance_pct = ((spot - floor) / floor * 100.0) if floor else 0.0
+    # A zero floor is not a valid boundary; reporting 0.0% distance would look like a
+    # real reading. Report null so the cockpit shows "—" instead of a plausible lie.
+    distance_pct = round(((spot - floor) / floor * 100.0), 3) if floor else None
     live = market_data.get_spot()
     return {
         "fedwatch_dovish_probability": float(record["fedwatch_dovish_prob"]),
@@ -236,7 +235,7 @@ def _latest_macro_state():
         "timestamp": record["_parsed_date"].strftime("%Y-%m-%d"),
         "spot_price": round(spot, 2),
         "liquidity_sweep_floor": round(floor, 2),
-        "distance_to_floor_pct": round(distance_pct, 3),
+        "distance_to_floor_pct": distance_pct,
         "data_source": str(record.get("source", "UNKNOWN")),
         "market_spot": live["price"] if live else None,
         "market_spot_source": live["source"] if live else None,

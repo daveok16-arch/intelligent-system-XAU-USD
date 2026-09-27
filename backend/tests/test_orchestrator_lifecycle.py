@@ -9,7 +9,6 @@ made the draft unable to boot, and with a real end-to-end lifecycle test.
 
 import os
 import sys
-import threading
 import unittest
 from unittest.mock import MagicMock, patch
 

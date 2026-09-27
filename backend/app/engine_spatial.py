@@ -26,7 +26,6 @@ Corrections applied to the Directive 04 draft (each verified against live data):
 import os
 import sys
 import time
-from datetime import datetime, timezone
 
 import pandas as pd
 import yfinance as yf

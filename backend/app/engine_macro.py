@@ -23,13 +23,13 @@ Methodology (all documented so the numbers are auditable):
 import os
 import sys
 import time
-from datetime import datetime, timezone
 
 import pandas as pd
 import requests
 
 # market_data lives one level up (backend/), shared with the API service.
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_DIR = os.path.dirname(_BACKEND_DIR)
 if _BACKEND_DIR not in sys.path:
     sys.path.append(_BACKEND_DIR)
 
@@ -42,18 +42,19 @@ FED_TARGET_SERIES = os.getenv("FED_TARGET_SERIES", "DFEDTARU")
 TWO_YEAR_SERIES = os.getenv("TWO_YEAR_SERIES", "DGS2")
 HTTP_TIMEOUT = float(os.getenv("MACRO_HTTP_TIMEOUT", "15"))
 
+# DATA_DIR must be honoured here: every other module (engine_spatial, main.py,
+# orchestrator.py) resolves the repository directory through it. Ignoring it here meant
+# the macro writer could target a different directory from the one the API reads,
+# silently freezing the macro repository in any deployment that sets DATA_DIR.
+_DATA_DIR = os.getenv("DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
 REPO_PATH = os.getenv(
     "MACRO_REPO_CSV",
-    os.path.join(os.path.dirname(_BACKEND_DIR), "data", "macro_intelligence_repository.csv"),
+    os.path.join(_DATA_DIR, "macro_intelligence_repository.csv"),
 )
 
 # No custom User-Agent: FRED's edge stalls requests carrying the bot-style UA we
 # previously sent, while plain requests return in ~0.1s. Both feeds accept default headers.
 _UA = None
-
-
-def _clamp(value, low, high):
-    return max(low, min(high, value))
 
 
 def _get_with_retry(url, params, attempts=3, backoff=2.0):
@@ -117,12 +118,6 @@ class InstitutionalDataIngestor:
         if not rows:
             raise ValueError(f"FRED series {series} returned no usable observations")
         return pd.DataFrame(rows)
-
-    def _fred_latest(self, series):
-        """Most recent observation only (kept for compatibility)."""
-        s = self._fred_series(series)
-        last = s.iloc[-1]
-        return str(last["date"]), float(last["value"])
 
     def ingest_weekly_macro_gravity(self, lookback_rows=None):
         """Pillar 1. Return the dovish-pivot series as a DataFrame (Directive 01 contract).
@@ -283,8 +278,15 @@ class InstitutionalDataIngestor:
             floor = float(latest_prior["liquidity_sweep_floor"])
         else:
             live = market_data.get_spot()
-            spot = live["price"] if live else 0.0
-            floor = round(spot * 0.995, 2) if spot else 0.0
+            if not live or not live.get("price"):
+                # No prior levels and no live feed: refuse rather than persist a
+                # fabricated 0.0 price (which would also yield a 0.0 sweep floor).
+                raise ValueError(
+                    "no prior spatial levels and the live spot feed is unavailable; "
+                    "refusing to write a fabricated price"
+                )
+            spot = float(live["price"])
+            floor = round(spot * 0.995, 2)
 
         rows = [
             {
