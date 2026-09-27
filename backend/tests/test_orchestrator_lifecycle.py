@@ -75,6 +75,31 @@ class TestOrchestratorLifecycle(unittest.TestCase):
         self.orchestrator.shutdown_signal.set()
         self.assertFalse(self.orchestrator.poll_api_health(max_retries=5))
 
+    # --- regression: deployment bind + proxy trust --------------------------------
+    def test_api_binds_all_interfaces_for_containers(self):
+        """Regression: a 127.0.0.1 bind is unreachable through EXPOSE/-p, silently
+        breaking every container deployment topology."""
+        self.assertEqual(orchestrator.API_HOST, "0.0.0.0")
+
+    def test_health_url_targets_loopback_not_wildcard(self):
+        """Health polling must not target 0.0.0.0."""
+        from urllib.parse import urlparse
+
+        self.assertEqual(urlparse(orchestrator.HEALTH_URL).hostname, "127.0.0.1")
+
+    def test_forwarded_allow_ips_defaults_to_loopback_only(self):
+        """Broad proxy trust ('*') lets a client spoof X-Forwarded-For and poison the
+        auth forensics log, so the default must be loopback-only."""
+        self.assertNotEqual(orchestrator.FORWARDED_ALLOW_IPS, "*")
+        self.assertEqual(orchestrator.FORWARDED_ALLOW_IPS, "127.0.0.1")
+
+    def test_uvicorn_command_includes_forwarded_allow_ips(self):
+        """Item 2 requires proxy trust to be configured at launch, not merely documented."""
+        import inspect
+
+        src = inspect.getsource(orchestrator.MasterSystemOrchestrator.launch_system_platform)
+        self.assertIn("--forwarded-allow-ips", src)
+
     # --- cache warming ------------------------------------------------------------
     def test_warm_data_caches_triggers_macro_when_missing(self, ):
         events = []

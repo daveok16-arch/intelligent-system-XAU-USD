@@ -155,19 +155,44 @@ def test_401_raises_auth_failure_flag(monkeypatch):
 
 
 def test_auth_failure_banner_and_state_scrub(monkeypatch):
-    """On auth failure the HUD must show the banner and leak no live values."""
-    import importlib
-    monkeypatch.setenv("SYSTEM_AUTH_TOKEN", "")
+    """On a 401 the HUD must show the banner and leak no live values.
 
-    def fake_get_json(url, params=None, timeout=4):
-        app.AUTH_FAILED["flag"] = True
-        return None
+    AppTest re-executes the script in a fresh namespace, so patching the imported
+    module has no effect -- the module-level `_get_json` is re-created. A real stub
+    server returning 401 is the only deterministic way to drive this path.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    monkeypatch.setattr(app, "_get_json", fake_get_json)
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.end_headers()
+            self.wfile.write(b'{"detail":"denied"}')
+
+        def log_message(self, *_a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    monkeypatch.setenv("API_BASE", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("SYSTEM_AUTH_TOKEN", "definitely-wrong")
+
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file(os.path.join(_FRONTEND_DIR, "streamlit_app.py"), default_timeout=45).run()
-    assert len(at.exception) == 0, [e.value for e in at.exception]
-    md = " ".join(m.value for m in at.markdown)
-    assert "AUTHENTICATION HANDSHAKE FAILED" in md
-    assert "SYSTEM STATE UNAVAILABLE" in md
+    try:
+        at = AppTest.from_file(os.path.join(_FRONTEND_DIR, "streamlit_app.py"), default_timeout=45).run()
+        assert len(at.exception) == 0, [e.value for e in at.exception]
+        md = " ".join(m.value for m in at.markdown)
+        assert "AUTHENTICATION HANDSHAKE FAILED" in md
+        assert "SYSTEM STATE UNAVAILABLE" in md
+    finally:
+        server.shutdown()

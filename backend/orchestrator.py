@@ -54,9 +54,16 @@ for _p in (_BACKEND_DIR, _APP_DIR):
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
 
-API_HOST = os.getenv("API_HOST", "127.0.0.1")
+# Bind all interfaces by default: a container binding 127.0.0.1 is unreachable through
+# EXPOSE/-p, which silently breaks every deployment topology. Override with API_HOST.
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
-HEALTH_URL = os.getenv("HEALTH_URL", f"http://{API_HOST}:{API_PORT}/health")
+# Health polling always targets loopback, never the wildcard bind address.
+_HEALTH_HOST = "127.0.0.1" if API_HOST in ("0.0.0.0", "", "::") else API_HOST
+HEALTH_URL = os.getenv("HEALTH_URL", f"http://{_HEALTH_HOST}:{API_PORT}/health")
+# Trusted reverse-proxy hops for X-Forwarded-For. Default to loopback only: broad trust
+# ('*') lets a client spoof its origin IP and poison the auth forensics log.
+FORWARDED_ALLOW_IPS = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
 if urlparse(HEALTH_URL).hostname in (None, "127.0.0"):
     # Guard against the directive's unbindable literal host.
     HEALTH_URL = f"http://127.0.0.1:{API_PORT}/health"
@@ -269,6 +276,7 @@ class MasterSystemOrchestrator:
         cmd = [
             sys.executable, "-m", "uvicorn", "main:app",
             "--host", API_HOST, "--port", str(API_PORT), "--log-level", "warning",
+            "--forwarded-allow-ips", FORWARDED_ALLOW_IPS,
         ]
         # cwd=backend/ so `main:app` and its sibling imports resolve regardless of caller CWD.
         self.api_process = subprocess.Popen(cmd, cwd=_BACKEND_DIR)

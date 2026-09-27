@@ -76,3 +76,18 @@ renders it for human approval.
   `WWW-Authenticate: Bearer` and never leak which part of the token was wrong.
 - Cockpit shows a prominent banner and scrubs displayed state on 401 rather than
   silently falling back to local data.
+
+## Deployment (Docker)
+- Root `requirements.txt` is required: the Dockerfile's `COPY requirements.txt .` fails
+  without it (only backend/ and frontend/ had one).
+- `API_HOST` must default to `0.0.0.0`. A container binding 127.0.0.1 is unreachable
+  through EXPOSE/-p. `HEALTH_URL` still targets loopback.
+- `FORWARDED_ALLOW_IPS` defaults to `127.0.0.1` (loopback only). Never `*`: broad trust
+  lets a client spoof X-Forwarded-For and poison the auth forensics log.
+- Dockerfile: multi-stage, non-root (uid 1000 via a real account), stdlib HEALTHCHECK
+  (slim has no curl). CMD `python -m backend.orchestrator`.
+- docker-compose: backend publishes **no** host port (internal network only); cockpit
+  published as 8501. `SYSTEM_AUTH_TOKEN` uses `${VAR:?}` so the stack refuses to start
+  with a missing credential.
+- `AppTest` re-executes the script in a fresh namespace: monkeypatching the imported
+  module does not affect it. Use a stub HTTP server for render-path tests.
