@@ -33,3 +33,15 @@ renders it for human approval.
 - `fedwatch_dovish_prob` is a **logistic proxy** (FRED DGS2 vs DFEDTARU), not true CME
   FedWatch. Must stay labelled as a proxy.
 - History chart is COMEX **futures** (`GC=F`), a proxy — not XAU/USD spot.
+
+## Spatial boundary engine (Directive 04)
+- `backend/app/engine_spatial.py` (`SpatialBoundaryEngine`) → `data/spatial_boundaries_repository.csv`.
+- Columns: `Date` (ISO string), `Three_Day_High`, `Three_Day_Low`, `Sweep_Floor` (= Low − 1.50),
+  `ATR_14`, `Source`. Swing/ATR windows are shifted 1 session to avoid look-ahead bias.
+- **No fabricated values.** ATR is a real 14-period mean; rows lacking full lookback are
+  dropped, never `fillna`-ed. The directive draft's `.fillna(10.0)` stamped a fake constant.
+- **Fallback serves a real cached payload only** (`data/spatial_raw_cache.csv`, labelled
+  `CACHE_GC=F`). With no cache it raises `SpatialDataUnavailable` — it never invents prices.
+- `yfinance` (>=0.2.40) works from this egress via query2 for `GC=F`; output is MultiIndex,
+  so flatten columns before use.
+- Tests: `backend/tests/test_engine_spatial.py`. Both regression guards are mutation-verified.
