@@ -71,7 +71,7 @@ def _latest_state():
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    latest = df.iloc[-1]
+    latest = df.loc[df["week_ending_date"].astype(str).idxmax()]
     spot = float(latest["spot_price"])
     floor = float(latest["liquidity_sweep_floor"])
     distance_pct = ((spot - floor) / floor * 100.0) if floor else 0.0
@@ -87,6 +87,7 @@ def _latest_state():
         "spot_price": round(spot, 2),
         "liquidity_sweep_floor": round(floor, 2),
         "distance_to_floor_pct": round(distance_pct, 3),
+        "data_source": str(latest.get("source", "UNKNOWN")),
         "market_spot": live["price"] if live else None,
         "market_spot_source": live["source"] if live else None,
         "market_spot_as_of": live["as_of"] if live else None,
