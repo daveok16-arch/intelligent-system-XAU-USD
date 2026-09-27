@@ -149,3 +149,34 @@ renders it for human approval.
 - **Conclusion: the sweep entry is WORSE than simply holding, and has no statistically
   distinguishable edge.** Neither the macro gate nor the spatial floor carries alpha as
   specified. Do not wire either into execution.
+
+## Parameter tensor + interaction (Directive 15)
+- `backend/app/strategy_optimizer.py` sweeps target × stop × hold × macro-gated, reusing
+  the verified `SpatialEdgeBacktester` so the two engines cannot diverge.
+- **The draft was the most dangerous artefact in this project.** `gold_historical_daily_raw.csv`
+  did not exist, so it fell back to SYNTHESISING prices from the indicator being traded
+  (`Close = Sweep_Floor + 2*ATR`, `Low = Sweep_Floor - 0.5*ATR`, `High = Close + ATR`) and
+  then backtested against them. Its construction made the strategy unlosable — a 2.5*ATR
+  target is always reached, a 2.0*ATR stop never hit — and it reported t-stats of **634**.
+  That was algebra, not edge.
+- **Second, subtler bias found by our own re-run:** crediting an exit on the ENTRY bar
+  assumes the bar's High printed *after* the Low that triggered the fill — perfect
+  intrabar foresight. `allow_entry_bar_exit` defaults to **False**. Measured impact on the
+  best cell: t **+6.16 → −6.64** once the foresight assumption is removed.
+- **Entry-convention contamination:** the strategy fills at the FLOOR while the baseline is
+  measured from the bar CLOSE, and the floor sits ~0.2% below that close, giving the
+  strategy a cheaper start by construction. 104 of 150 cells exceeded |t|>2 where a true
+  null yields ~5% — the signature of bias, not edge.
+
+### Decisive result — convention-free test (both sides buy at close)
+| Horizon | Sweep fwd | Unconditional fwd | Edge | t |
+|---|---|---|---|---|
+| 1 bar | +0.0070% | +0.0486% | −0.042% | −1.16 |
+| 2 bars | +0.0284% | +0.0966% | −0.068% | −1.37 |
+| 3 bars | +0.0600% | +0.1448% | −0.085% | −1.44 |
+| 5 bars | +0.1684% | +0.2420% | −0.074% | −0.97 |
+
+**The sweep event predicts nothing.** Forward returns after a sweep are *below* average at
+every horizon — there is no post-sweep bounce. The macro gate (Directive 13) and the
+spatial mean-reversion floor (Directives 14–15) are both closed. Reframe as a
+situational-awareness dashboard.

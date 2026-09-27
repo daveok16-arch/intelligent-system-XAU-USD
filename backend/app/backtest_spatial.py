@@ -90,8 +90,16 @@ class SpatialEdgeBacktester:
         return out
 
     # --- simulation --------------------------------------------------------------
-    def simulate(self, df, atr_target_mult=1.5, atr_stop_mult=1.0, gap_aware=True):
-        """Walk each sweep forward up to HOLD_BARS. Returns per-trade records."""
+    def simulate(self, df, atr_target_mult=1.5, atr_stop_mult=1.0, gap_aware=True,
+                 hold_bars=None, allow_entry_bar_exit=False):
+        """Walk each sweep forward up to `hold_bars` (defaults to HOLD_BARS).
+
+        `allow_entry_bar_exit=False` (default, and honest): the entry bar's High may have
+        printed BEFORE its Low triggered the fill, so crediting a target hit on the entry
+        bar assumes perfect intrabar foresight. Exits resolve from the NEXT bar forward.
+        True reproduces that optimistic assumption so its impact can be measured.
+        """
+        hold_bars = hold_bars or HOLD_BARS
         trades = []
         n = len(df)
         lows = df["Low"].to_numpy()
@@ -102,7 +110,7 @@ class SpatialEdgeBacktester:
         atrs = df["ATR"].to_numpy()
         dates = df["Date"].to_numpy()
 
-        for i in range(n - HOLD_BARS):
+        for i in range(n - hold_bars):
             floor, atr = floors[i], atrs[i]
             if np.isnan(floor) or np.isnan(atr) or atr <= 0:
                 continue
@@ -118,18 +126,20 @@ class SpatialEdgeBacktester:
 
             exit_price, exit_reason, bars_held, both_touched = None, None, None, False
 
-            # Entry bar: OHLC cannot reveal whether the high or the low came first.
+            # Entry bar: OHLC alone cannot say whether the High or the Low came first, so
+            # by default we do NOT resolve exits on the bar we entered on.
             hit_stop = lows[i] <= stop_price
             hit_target = highs[i] >= target_price
-            if hit_stop and hit_target:
-                both_touched = True
-                exit_price, exit_reason, bars_held = stop_price, "stop_stop_first", 0
-            elif hit_stop:
-                exit_price, exit_reason, bars_held = stop_price, "stop", 0
-            elif hit_target:
-                exit_price, exit_reason, bars_held = target_price, "target", 0
-            else:
-                for j in range(i + 1, min(i + 1 + HOLD_BARS, n)):
+            if allow_entry_bar_exit:
+                if hit_stop and hit_target:
+                    both_touched = True
+                    exit_price, exit_reason, bars_held = stop_price, "stop_stop_first", 0
+                elif hit_stop:
+                    exit_price, exit_reason, bars_held = stop_price, "stop", 0
+                elif hit_target:
+                    exit_price, exit_reason, bars_held = target_price, "target", 0
+            if exit_price is None:
+                for j in range(i + 1, min(i + 1 + hold_bars, n)):
                     s = lows[j] <= stop_price
                     t = highs[j] >= target_price
                     if s and t:
@@ -143,7 +153,7 @@ class SpatialEdgeBacktester:
                         exit_price, exit_reason, bars_held = target_price, "target", j - i
                         break
             if exit_price is None:       # neither hit within the horizon
-                k = min(i + HOLD_BARS, n - 1)
+                k = min(i + hold_bars, n - 1)
                 exit_price, exit_reason, bars_held = closes[k], "time_exit", k - i
 
             gross = (exit_price - entry) / entry
@@ -174,6 +184,38 @@ class SpatialEdgeBacktester:
             return float("nan")
         se = np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b))
         return float((a.mean() - b.mean()) / se) if se > 0 else float("nan")
+
+    # --- convention-free diagnostic --------------------------------------------------
+    @staticmethod
+    def sweep_predictive_test(bars, horizons=(1, 2, 3, 5)):
+        """The authoritative test, free of entry-convention artefacts.
+
+        Exit-pricing comparisons are contaminated: the strategy fills at the FLOOR while
+        the baseline is measured from the bar CLOSE, and the floor sits ~0.2% below that
+        close, handing the strategy a cheaper start by construction. This test uses ONE
+        convention on both sides -- buy at the close -- and asks the only question that
+        matters: is the forward return after a sweep different from the average?
+
+        If the sweep event carries mean-reversion edge, sweep-bar forward returns should
+        EXCEED the unconditional forward return. If they do not, the hypothesis is dead.
+        """
+        sweep = (bars["Low"] <= bars["Floor"]).to_numpy()
+        out = []
+        close = bars["Close"].to_numpy()
+        for h in horizons:
+            fwd = np.full(len(close), np.nan)
+            fwd[:-h] = (close[h:] - close[:-h]) / close[:-h]
+            sweep_fwd = fwd[sweep]
+            all_fwd = fwd[~np.isnan(fwd)]
+            sweep_fwd = sweep_fwd[~np.isnan(sweep_fwd)]
+            out.append({
+                "Horizon_Bars": h,
+                "Sweep_Mean_Fwd_Pct": round(float(sweep_fwd.mean() * 100), 4) if len(sweep_fwd) else None,
+                "Unconditional_Mean_Fwd_Pct": round(float(all_fwd.mean() * 100), 4),
+                "Edge_Pct": round(float((sweep_fwd.mean() - all_fwd.mean()) * 100), 4) if len(sweep_fwd) else None,
+                "T_Stat": round(float(SpatialEdgeBacktester._welch(sweep_fwd, all_fwd)), 4),
+            })
+        return pd.DataFrame(out)
 
     # --- report ------------------------------------------------------------------
     def run_spatial_evaluation(self, atr_target_mult=1.5, atr_stop_mult=1.0):
