@@ -45,3 +45,18 @@ renders it for human approval.
 - `yfinance` (>=0.2.40) works from this egress via query2 for `GC=F`; output is MultiIndex,
   so flatten columns before use.
 - Tests: `backend/tests/test_engine_spatial.py`. Both regression guards are mutation-verified.
+
+## Orchestrator (Directive 08)
+- Canonical lifecycle engine: `backend/orchestrator.py`. `backend/app/main_orchestrator.py`
+  is a delegation shim only — do not fork a second copy of the logic.
+- Pre-flight `warm_data_caches()` seeds any missing/empty repository so the API cannot
+  boot into a 503 state.
+- Two daemon threads (`run_macro_loop`, `run_spatial_loop`), each with typed exception
+  logging and exponential backoff; neither crash kills the app context.
+- Health: `HEALTH_URL` defaults to `http://127.0.0.1:<port>/health`. **Never** use the
+  directive's literal `http://127.0.0`, which parses as host `127.0` port 80 and always
+  refuses; a guard repairs that host automatically.
+- **Launch is `main:app` with `cwd=backend/`.** `python -m uvicorn backend.main:app`
+  from the project root dies with `ModuleNotFoundError: No module named 'market_data'`.
+- Signal handler only flags shutdown; the main thread performs ordered teardown and
+  exits 1 when boot failed (so Docker/K8s see the failure).
