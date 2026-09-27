@@ -2,3 +2,13 @@ __pycache__/
 *.pyc
 .streamlit/
 .pytest_cache/
+
+# Database artefacts are environment state, not source. The CSV files under data/history/
+# are the source of truth and are committed; the database is rebuilt from them with
+#   python -m backend.app.repository --init --migrate-csv
+# WAL and SHM are SQLite runtime files and must never be versioned.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
