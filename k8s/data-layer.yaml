@@ -8,20 +8,16 @@
 #   4. The Secret the workloads consume was never defined.
 #
 # Storage topology (corrected): both writers publish into a SHARED repository volume
-# mounted at /workspace/project/data, each writing its own distinct file. A single
-# ReadWriteOnce volume is safe because exactly ONE writer pod is ever active at a
-# time (concurrencyPolicy: Forbid, and the two CronJobs write different files). This
-# avoids the multi-writer corruption the directive worried about while still letting
-# the read-only API and cockpit see BOTH repositories.
+# mounted at /workspace/project/data, each writing its own distinct file, plus the
+# data/history/ subdirectory holding the multi-decade reference store. A single
+# ReadWriteOnce volume is safe because exactly ONE writer pod is ever active at a time
+# (concurrencyPolicy: Forbid, and the jobs write different files). The read-only API and
+# cockpit see every file.
 #
-# (An earlier revision split this into two PVCs. That isolated the writers but broke
-#  the readers: the API could only see one file, so /api/v1/spatial-boundaries always
-#  returned 503. Readers must see every repository the API serves.)
-#
-# Reader topology: the API/cockpit mount this volume read-only. ReadWriteOnce means
-# all reader pods must be scheduled on the SAME node as the volume, so a multi-node
-# HPA fan-out is NOT supported by this topology -- use a shared read-only CSI volume
-# or object store before scaling across nodes.
+# Reader topology: the API/cockpit mount this volume read-only. ReadWriteOnce means all
+# reader pods must be scheduled on the SAME node as the volume, so a multi-node HPA
+# fan-out is NOT supported by this topology -- use a shared read-only CSI volume or
+# object store before scaling across nodes.
 
 apiVersion: v1
 kind: Namespace

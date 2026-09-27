@@ -26,6 +26,7 @@ import logging
 import os
 import secrets
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -329,4 +330,163 @@ def get_spatial_boundaries():
         "sweep_floor": float(record["Sweep_Floor"]),
         "atr_14": float(record["ATR_14"]),
         "source": str(record["Source"]),
+    }
+
+
+# ------------------------------------------------------------------ history surface
+HISTORY_DIR = os.getenv(
+    "HISTORY_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "history")
+)
+_MACRO_HISTORY = os.path.join(HISTORY_DIR, "macro_history.csv")
+_PRICE_HISTORY = os.path.join(HISTORY_DIR, "price_history.csv")
+_SPATIAL_HISTORY = os.path.join(HISTORY_DIR, "spatial_history.csv")
+
+
+class TrendPoint(BaseModel):
+    date: str
+    value: float
+
+
+class MacroHistoryResponse(BaseModel):
+    as_of: str
+    points: int
+    total_points: int
+    history_start: str
+    sdi: TrendPoint
+    commercial_net_52w_low: float
+    commercial_net_52w_high: float
+    commercial_net: TrendPoint
+    commercial_net_change_4w: float
+    fedwatch_dovish_probability: TrendPoint
+    dovish_change_4w: float
+    system_gate_status: str
+    gate_open_weeks_52w: int
+    source: str
+
+
+class PriceHistoryResponse(BaseModel):
+    as_of: str
+    points: int
+    last_close: float
+    return_1w_pct: float
+    return_4w_pct: float
+    return_52w_pct: float
+    high_52w: float
+    low_52w: float
+    pct_from_52w_high: float
+    realized_vol_20d_annual_pct: float
+    source: str
+
+
+def _read_history(path, required):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="History store not built. Run: python -m backend.app.history_store",
+        )
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"History unreadable: {exc}")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"History missing columns: {missing}")
+    df["_d"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["_d"]).sort_values("_d").reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="History is empty.")
+    return df
+
+
+@app.get("/api/v1/macro-history", response_model=MacroHistoryResponse)
+def get_macro_history(limit: int = Query(default=260, ge=1, le=5000,
+                                         description="Most recent weekly rows to return.")):
+    """Multi-decade positioning + macro context: trend, range, and change over time."""
+    df = _read_history(_MACRO_HISTORY, ["date", "SDI", "Commercial_Net", "fedwatch_dovish_prob"])
+    window = df.tail(limit)
+
+    latest = df.iloc[-1]
+
+    def _change(col, weeks=4):
+        if len(df) <= weeks:
+            return 0.0
+        return round(float(latest[col]) - float(df.iloc[-1 - weeks][col]), 4)
+
+    wk52 = df.tail(52)
+    low = float(latest["Commercial_Net_52w_Low"]) if pd.notna(latest.get("Commercial_Net_52w_Low")) else float(wk52["Commercial_Net"].min())
+    high = float(latest["Commercial_Net_52w_High"]) if pd.notna(latest.get("Commercial_Net_52w_High")) else float(wk52["Commercial_Net"].max())
+    return {
+        "as_of": str(latest["date"]),
+        "points": int(len(window)),
+        "total_points": int(len(df)),
+        "history_start": str(df["date"].iloc[0]),
+        "sdi": TrendPoint(date=str(latest["date"]), value=float(latest["SDI"])),
+        "commercial_net_52w_low": round(low, 2),
+        "commercial_net_52w_high": round(high, 2),
+        "commercial_net": TrendPoint(date=str(latest["date"]), value=float(latest["Commercial_Net"])),
+        "commercial_net_change_4w": _change("Commercial_Net"),
+        "fedwatch_dovish_probability": TrendPoint(date=str(latest["date"]), value=float(latest["fedwatch_dovish_prob"])),
+        "dovish_change_4w": _change("fedwatch_dovish_prob"),
+        "system_gate_status": str(latest["MACRO_GATE"]),
+        "gate_open_weeks_52w": int((wk52["MACRO_GATE"] == "OPEN").sum()),
+        "source": str(latest.get("source", "UNKNOWN")),
+    }
+
+
+@app.get("/api/v1/price-history", response_model=PriceHistoryResponse)
+def get_price_history():
+    """Trend and volatility context for the underlying."""
+    df = _read_history(_PRICE_HISTORY, ["date", "close"])
+    latest = df.iloc[-1]
+    close = float(latest["close"])
+
+    def _ret(periods):
+        if len(df) <= periods:
+            return 0.0
+        past = float(df.iloc[-1 - periods]["close"])
+        return round((close - past) / past * 100, 2) if past else 0.0
+
+    wk52 = df.tail(252)
+    high52 = float(wk52["close"].max())
+    low52 = float(wk52["close"].min())
+    rets = df["close"].pct_change().dropna().tail(20)
+    vol = float(rets.std() * np.sqrt(252) * 100) if len(rets) > 1 else 0.0
+
+    return {
+        "as_of": str(latest["date"]),
+        "points": int(len(df)),
+        "last_close": round(close, 2),
+        "return_1w_pct": _ret(5),
+        "return_4w_pct": _ret(20),
+        "return_52w_pct": _ret(252),
+        "high_52w": round(high52, 2),
+        "low_52w": round(low52, 2),
+        "pct_from_52w_high": round((close - high52) / high52 * 100, 2) if high52 else 0.0,
+        "realized_vol_20d_annual_pct": round(vol, 2),
+        "source": str(latest.get("source", "UNKNOWN")),
+    }
+
+
+@app.get("/api/v1/series")
+def get_series(
+    name: str = Query(..., pattern=r"^(sdi|commercial_net|fedwatch|close|atr14|sweep_floor)$"),
+    limit: int = Query(default=260, ge=1, le=5000),
+):
+    """Dense time series for charting one named measure."""
+    mapping = {
+        "sdi": (_MACRO_HISTORY, "SDI"),
+        "commercial_net": (_MACRO_HISTORY, "Commercial_Net"),
+        "fedwatch": (_MACRO_HISTORY, "fedwatch_dovish_prob"),
+        "close": (_PRICE_HISTORY, "close"),
+        "atr14": (_SPATIAL_HISTORY, "ATR_14"),
+        "sweep_floor": (_SPATIAL_HISTORY, "Sweep_Floor"),
+    }
+    path, col = mapping[name]
+    df = _read_history(path, ["date", col]).tail(limit)
+    return {
+        "name": name,
+        "points": [{"date": str(d), "value": round(float(v), 4)}
+                   for d, v in zip(df["date"], df[col]) if pd.notna(v)],
     }

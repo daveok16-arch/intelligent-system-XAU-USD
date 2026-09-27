@@ -188,6 +188,28 @@ class MasterSystemOrchestrator:
 
             SpatialBoundaryEngine(ticker="GC=F").execute_pipeline()
 
+        self._warm_history_store()
+
+    def _warm_history_store(self):
+        """Ensure the historical reference store exists so trend panels are populated.
+
+        The API degrades to 503 on the history routes if this is absent, which is correct
+        behaviour but a poor first-run experience. It is therefore part of pre-flight.
+        """
+        history_dir = os.path.join(DATA_DIR, "history")
+        marker = os.path.join(history_dir, "macro_history.csv")
+        if os.path.exists(marker) and os.path.getsize(marker) > 0:
+            return
+        print("📚 [CACHE WARMING] History store missing. Building reference history...")
+        try:
+            import history_store
+
+            history_store.main([])
+        except Exception as exc:
+            # History is an enhancement; its absence must not stop the platform booting.
+            print(f"⚠️  [CACHE WARMING] History build failed ({type(exc).__name__}: {exc}). "
+                  f"Trend panels will report unavailable.")
+
     # --- worker loops -------------------------------------------------------------
     def run_macro_loop(self):
         """Isolated worker. Polls every interval and runs only inside the Friday
