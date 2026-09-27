@@ -38,6 +38,16 @@ jobs:
         # Validate its shape rather than refetching (CI has no market-data dependency).
         run: python scripts/check_history.py
 
+      - name: Build the database from the committed CSVs
+        # Proves the rebuild path works from a clean checkout: the database is not
+        # versioned, so this is exactly what a new environment does.
+        run: |
+          python -m backend.app.repository --init --migrate-csv
+          python -m backend.app.repository --status
+
+      - name: Verify repository integrity constraints hold
+        run: python -m pytest backend/tests/test_repository.py -q
+
       - name: Run tests
         # Unit tests stub network calls; no live market data is required.
         run: python -m pytest backend/tests frontend/tests -q
