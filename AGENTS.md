@@ -128,3 +128,24 @@ renders it for human approval.
   **t = 0.19** (statistically indistinguishable from chance)
 - **Conclusion: the gate as specified has no demonstrated edge and materially
   underperforms simply holding gold.** Do not proceed to execution on this rule.
+
+## Spatial sweep backtest (Directive 14)
+- `backend/app/backtest_spatial.py` tests the stop-hunt hypothesis: a limit buy inside
+  `Sweep_Floor` (3-day low − $1.50) catching a mean-reverting bounce.
+- **Real daily OHLC is required.** The directive read `Low`/`High`/`Close` from
+  `spatial_boundaries_repository.csv`, which has only structural columns — it died with
+  `KeyError: ['Low', 'High']`. The engine fetches GC=F daily bars and raises
+  `SpatialBacktestDataUnavailable` rather than simulating.
+- **The decisive correction: the null must be the unconditional forward hold, not zero.**
+  Gold drifts up, so a long-only rule beats zero for free. The draft tested against zero
+  and would have reported a misleadingly positive sign.
+- Also fixed: the draft only inspected the entry bar, so the stated 3-day hold never
+  happened; gap-through fills are now modelled (fill at open when it gaps below the limit).
+
+### Measured result (2000-08-30 to 2026-09-25, 6,543 bars, 1,424 sweeps)
+- Win rate **46.35%**, profit factor **1.047**, compounded **+29.4%**
+- Avg trade **+0.031%** vs baseline hold **+0.095%**
+- t **vs zero**: +0.73 (looks positive — pure drift) · t **vs baseline**: **−1.30**
+- **Conclusion: the sweep entry is WORSE than simply holding, and has no statistically
+  distinguishable edge.** Neither the macro gate nor the spatial floor carries alpha as
+  specified. Do not wire either into execution.
