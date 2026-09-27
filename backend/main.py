@@ -21,13 +21,19 @@ Directive 06 corrections, each verified against the live container:
      before they can reach the JSON layer.
 """
 
+import hmac
+import logging
 import os
+import secrets
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+
+logger = logging.getLogger("institutional.api")
 
 import market_data
 
@@ -58,6 +64,79 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+# --- authentication ---------------------------------------------------------------
+# Stateless bearer auth for the entire /api/* surface.
+#
+# Directive 10 deviations (both are security-critical):
+#   1. The draft protected only /api/v1/* and /api/history -- leaving /api/state, which
+#      returns the IDENTICAL macro payload, wide open. Protection is enforced by
+#      middleware across all /api/* paths, so a new route cannot be added unprotected
+#      by omission. /health stays open for orchestrator socket polling.
+#   2. The draft fell back to a hardcoded token when SYSTEM_AUTH_TOKEN was unset. That
+#      bakes a public secret into the image. This fails CLOSED instead.
+
+_BEARER_PREFIX = "bearer "
+_OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
+
+security_gate = HTTPBearer(auto_error=False)
+
+
+def system_auth_token():
+    """The configured bearer token, or None when none is provisioned."""
+    token = (os.getenv("SYSTEM_AUTH_TOKEN") or "").strip()
+    return token or None
+
+
+def _generate_ephemeral_token():
+    """Dev-only fallback: a random per-process token, logged once."""
+    token = secrets.token_urlsafe(32)
+    logger.warning(
+        "[AUTH] SYSTEM_AUTH_TOKEN is not set. Generated an ephemeral per-process token "
+        "for this run only. Set SYSTEM_AUTH_TOKEN for a stable credential."
+    )
+    return token
+
+
+def _unauthorized(request, detail):
+    """Emit a spec-compliant challenge. Never leaks whether the token was near-correct."""
+    logger.warning("[AUTH] Rejected %s %s from %s", request.method, request.url.path, request.client.host if request.client else "unknown")
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": detail},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@app.middleware("http")
+async def enforce_bearer_auth(request: Request, call_next):
+    path = request.url.path
+    if path in _OPEN_PATHS or request.method == "OPTIONS" or not path.startswith("/api/"):
+        return await call_next(request)
+
+    configured = system_auth_token()
+    expected = configured or _ephemeral_token()
+
+    header = request.headers.get("Authorization", "")
+    if not header.lower().startswith(_BEARER_PREFIX):
+        return _unauthorized(request, "Missing or malformed Authorization header.")
+
+    presented = header[len(_BEARER_PREFIX):].strip()
+    # Constant-time comparison resists timing oracles.
+    if not hmac.compare_digest(presented, expected):
+        return _unauthorized(request, "Invalid signature matrix. Institutional access denied.")
+
+    return await call_next(request)
+
+
+_ephemeral_token_cache = {}
+
+
+def _ephemeral_token():
+    if "value" not in _ephemeral_token_cache:
+        _ephemeral_token_cache["value"] = _generate_ephemeral_token()
+    return _ephemeral_token_cache["value"]
 
 
 class MacroStateResponse(BaseModel):

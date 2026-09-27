@@ -39,6 +39,9 @@ HISTORY_URL = f"{API_BASE}/api/history"
 MACRO_REPO = os.getenv("MACRO_REPO_CSV", os.path.join(_DATA_DIR, "macro_intelligence_repository.csv"))
 SPATIAL_REPO = os.getenv("SPATIAL_REPO_CSV", os.path.join(_DATA_DIR, "spatial_boundaries_repository.csv"))
 
+# Bearer token for the protected API surface. Read from the same variable the backend uses.
+SYSTEM_AUTH_TOKEN = (os.getenv("SYSTEM_AUTH_TOKEN") or "").strip()
+
 SWEEP_BUFFER_USD = 1.50  # 150 pips at $0.01/pip interbank spot convention
 
 # Last-resort baseline. Used only when neither the backend nor any repository answers.
@@ -84,10 +87,24 @@ st.markdown("---")
 
 
 # --- loading helpers -------------------------------------------------------------
+AUTH_FAILED = {"flag": False}  # set when the API rejects our credentials
+
+
+def _auth_headers():
+    return {"Authorization": f"Bearer {SYSTEM_AUTH_TOKEN}"} if SYSTEM_AUTH_TOKEN else {}
+
+
 def _get_json(url, params=None, timeout=4):
-    """Return parsed JSON or None. Never raises into the render path."""
+    """Return parsed JSON or None. Never raises into the render path.
+
+    A 401 is recorded so the HUD can surface a prominent authentication banner rather
+    than silently degrading to local data.
+    """
     try:
-        resp = requests.get(url, params=params, timeout=timeout)
+        resp = requests.get(url, params=params, headers=_auth_headers(), timeout=timeout)
+        if resp.status_code == 401:
+            AUTH_FAILED["flag"] = True
+            return None
         resp.raise_for_status()
         return resp.json()
     except Exception:
@@ -170,6 +187,21 @@ def load_history():
 macro, macro_source = load_macro_state()
 spatial, spatial_source = load_spatial()
 history = load_history()
+
+# Authentication failure is a hard stop: never present local/baseline values as if the
+# handshake succeeded. The banner is rendered first and the panels are suppressed.
+if AUTH_FAILED["flag"]:
+    for _key in ("fedwatch_dovish_probability", "sentiment_divergence_index", "system_gate_status"):
+        macro[_key] = None
+    spatial = dict(FALLBACK_SPATIAL)
+    history = None
+    st.markdown(
+        '<div style="background-color:#3d1418;border:1px solid #da3633;padding:18px;'
+        'border-radius:8px;color:#ff7b72;font-weight:bold;font-size:20px;text-align:center;">'
+        '🔴 CRITICAL ERROR: API AUTHENTICATION HANDSHAKE FAILED</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("No state is displayed. Set SYSTEM_AUTH_TOKEN identically on the API and cockpit.")
 
 
 def _fmt(value, spec=",.2f", prefix="$"):

@@ -60,3 +60,19 @@ renders it for human approval.
   from the project root dies with `ModuleNotFoundError: No module named 'market_data'`.
 - Signal handler only flags shutdown; the main thread performs ordered teardown and
   exits 1 when boot failed (so Docker/K8s see the failure).
+
+## Authentication (Directive 10)
+- Stateless bearer auth enforced by **HTTP middleware across every `/api/*` path**.
+  `_OPEN_PATHS` (allow-list) contains only `/health` and the docs routes. A new API
+  route is therefore protected by default, never open by omission.
+- **Never protect a subset of routes that share a payload.** `/api/state` returns the
+  same macro data as `/api/v1/macro-state`; protecting only the v1 routes would have
+  been a cosmetic bypass (caught in review, now guarded by a test).
+- `SYSTEM_AUTH_TOKEN` is read from the environment. **There is no hardcoded fallback.**
+  If unset, a random per-process ephemeral token is generated and warned once (dev only);
+  with a blank env, no caller-supplied value authenticates. Set the same value on the
+  API and the cockpit.
+- Constant-time compare (`hmac.compare_digest`); 401 responses carry
+  `WWW-Authenticate: Bearer` and never leak which part of the token was wrong.
+- Cockpit shows a prominent banner and scrubs displayed state on 401 rather than
+  silently falling back to local data.

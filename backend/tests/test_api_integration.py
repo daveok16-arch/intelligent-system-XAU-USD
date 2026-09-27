@@ -25,6 +25,9 @@ from fastapi.testclient import TestClient
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BACKEND_DIR)
 
+os.environ.setdefault("SYSTEM_AUTH_TOKEN", "test-token-abc123")
+AUTH_HEADERS = {"Authorization": "Bearer test-token-abc123"}
+
 import main  # noqa: E402
 
 
@@ -50,7 +53,7 @@ def _spatial_repo(path):
 
 class TestAPIIntegration(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(main.app)
+        self.client = TestClient(main.app, headers=AUTH_HEADERS)
 
     # --- 503 behaviour, isolated without touching real files ----------------------
     def test_macro_state_503_when_repository_missing(self):

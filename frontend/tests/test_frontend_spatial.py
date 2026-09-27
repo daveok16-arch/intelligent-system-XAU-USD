@@ -132,3 +132,42 @@ def test_app_renders_without_exception(monkeypatch):
     assert "SPATIAL MARKET BOUNDARY" in md
     assert "Spatial source:" in captions
     assert "150 pips" in md
+
+
+# --- Directive 10: auth wire-up -----------------------------------------------------
+def test_auth_headers_only_when_token_present(monkeypatch):
+    monkeypatch.setattr(app, "SYSTEM_AUTH_TOKEN", "abc")
+    assert app._auth_headers() == {"Authorization": "Bearer abc"}
+    monkeypatch.setattr(app, "SYSTEM_AUTH_TOKEN", "")
+    assert app._auth_headers() == {}
+
+
+def test_401_raises_auth_failure_flag(monkeypatch):
+    """A 401 must be recorded, not silently treated as 'no data'."""
+    class _Resp:
+        status_code = 401
+        def raise_for_status(self):
+            raise AssertionError("should not reach raise_for_status on 401")
+    monkeypatch.setattr(app.requests, "get", lambda *a, **k: _Resp())
+    app.AUTH_FAILED["flag"] = False
+    assert app._get_json("http://x/api/v1/macro-state") is None
+    assert app.AUTH_FAILED["flag"] is True
+
+
+def test_auth_failure_banner_and_state_scrub(monkeypatch):
+    """On auth failure the HUD must show the banner and leak no live values."""
+    import importlib
+    monkeypatch.setenv("SYSTEM_AUTH_TOKEN", "")
+
+    def fake_get_json(url, params=None, timeout=4):
+        app.AUTH_FAILED["flag"] = True
+        return None
+
+    monkeypatch.setattr(app, "_get_json", fake_get_json)
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(os.path.join(_FRONTEND_DIR, "streamlit_app.py"), default_timeout=45).run()
+    assert len(at.exception) == 0, [e.value for e in at.exception]
+    md = " ".join(m.value for m in at.markdown)
+    assert "AUTHENTICATION HANDSHAKE FAILED" in md
+    assert "SYSTEM STATE UNAVAILABLE" in md

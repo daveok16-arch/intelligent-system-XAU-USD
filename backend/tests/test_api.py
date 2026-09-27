@@ -13,6 +13,9 @@ from fastapi.testclient import TestClient
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BACKEND_DIR)
 
+os.environ.setdefault("SYSTEM_AUTH_TOKEN", "test-token-abc123")
+AUTH_HEADERS = {"Authorization": "Bearer test-token-abc123"}
+
 import main  # noqa: E402
 
 
@@ -33,7 +36,7 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "MACRO_REPO", str(repo))
     monkeypatch.setattr(main.market_data, "get_spot", lambda: {"price": 4286.2, "source": "gold-api.com", "as_of": "T"})
-    with TestClient(main.app) as c:
+    with TestClient(main.app, headers=AUTH_HEADERS) as c:
         yield c
 
 
