@@ -360,6 +360,77 @@ wired to execution.
 multi-year replication across a different regime would raise confidence materially and has
 not been done.
 
+## Volatility forecasting — does it beat EWMA? (the usable answer)
+
+`backend/app/volatility_forecast.py`. The sweep studies showed a larger absolute move
+follows a rejected sweep. But every desk already forecasts volatility with **EWMA**
+(RiskMetrics λ=0.94), and "volatility rises after a dip" is the leverage effect. So the
+only question that matters is:
+
+> Does sweep state add forecasting power **beyond EWMA**, out of sample?
+
+Tested as `log(RV_{t+1..t+h}) ~ a + b·log(EWMA_t) + c·sweep_t`, fit on the first 60%,
+evaluated on the last 40%, across four metals. `c` is the answer.
+
+### Result: it improves forecasts, but EWMA already has most of it
+
+| check | result |
+|---|---|
+| specifications tested | 12 (4 assets × 3 horizons) |
+| out-of-sample improvement over EWMA | **10/12** |
+| out-of-sample Diebold-Mariano significant | **3/12** |
+| median RMSE improvement | **0.051%** |
+| in-sample coefficient t-stats | 3.7–5.0 |
+
+The in-sample t-stats look impressive and mean nothing — that is the same trap this
+project has hit three times. The honest statistic is the **out-of-sample** DM test, and
+only 3 of 12 specifications clear it. **EWMA already captures the bulk of the effect.**
+
+### What the state actually predicts (practical multipliers)
+
+`exp(coef)` = multiplicative volatility multiplier relative to the EWMA prediction:
+
+| asset | state | h=1 | h=4 | h=12 |
+|---|---|---|---|---|
+| gold | rejected sweep | 1.30× | 1.17× | 1.09× |
+| gold | failed pierce | 1.44× | 1.26× | 1.12× |
+| silver | rejected sweep | 1.29× | 1.13× | 1.04× |
+| silver | failed pierce | 1.52× | 1.29× | 1.13× |
+| copper | rejected sweep | 1.22× | 1.14× | 1.02× |
+| copper | failed pierce | 1.33× | 1.20× | 1.05× |
+
+**Practical reading: after a sweep or a failed pierce, raise the volatility estimate
+~20–50% for the next 1–4 bars, decaying to near-nothing by 12.** That is usable for
+position sizing and stop placement, and it is a rule a practitioner can apply.
+
+### A correction to my own earlier claim
+
+The specificity study reported that rejected sweeps show *lower* forward movement than
+failed pierces (C4, t = −2.8 to −3.9 on raw absolute returns). Under this better-specified
+model the asymmetry **reverses**: `asymmetry_diff` is negative in **21 of 24**
+specifications, meaning a rejected sweep carries a *larger* coefficient than a failed
+pierce once EWMA is controlled for. My earlier raw-return comparison did not control for
+EWMA and misread the direction. The corrected statement:
+
+- **Both** resolutions raise volatility.
+- **Neither** is distinguishable from the other once EWMA is controlled (3/24 significant,
+  no asset consistent across horizons).
+- So the *resolution* is not informative for volatility — only *that a pierce happened*.
+
+That weakens the C4 interpretation but does not remove the effect: the pierce itself
+carries incremental information over EWMA, at short horizons, in all four metals.
+
+### Honest verdict
+
+**A real but modest forecast improvement.** 10/12 specifications improve, ~0.05% RMSE,
+significant in 3/12, with a clear horizon decay (short-lived information). EWMA with a
+faster decay (λ=0.70) absorbs much of it, which is the simplest way a practitioner would
+capture the same thing.
+
+**Not a deployable edge on its own**, and nothing is wired to execution. It is a defensible
+input to position sizing — "volatility is likely 20–50% above the EWMA estimate for the
+next few bars after a pierce" — and it is replicated across four metals.
+
 ## Conditional studies + walk-forward (the earlier finding)
 
 Following the volume and session leads, three further pre-registered studies were run.
