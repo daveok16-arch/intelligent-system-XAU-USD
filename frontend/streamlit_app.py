@@ -35,6 +35,9 @@ API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 MACRO_STATE_URL = f"{API_BASE}/api/v1/macro-state"
 SPATIAL_URL = f"{API_BASE}/api/v1/spatial-boundaries"
 HISTORY_URL = f"{API_BASE}/api/history"
+MACRO_HISTORY_URL = f"{API_BASE}/api/v1/macro-history"
+PRICE_HISTORY_URL = f"{API_BASE}/api/v1/price-history"
+SERIES_URL = f"{API_BASE}/api/v1/series"
 
 MACRO_REPO = os.getenv("MACRO_REPO_CSV", os.path.join(_DATA_DIR, "macro_intelligence_repository.csv"))
 SPATIAL_REPO = os.getenv("SPATIAL_REPO_CSV", os.path.join(_DATA_DIR, "spatial_boundaries_repository.csv"))
@@ -81,8 +84,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("📊 XAU/USD Unified Strategy Cockpit")
-st.subheader("Institutional Portfolio Management & Macro Intelligence Terminal")
+st.title("📊 XAU/USD Institutional Situational-Awareness Dashboard")
+
+st.subheader("Macro & Liquidity Intelligence Monitor — Observational, Not Advisory")
+
+st.markdown(
+    """
+    <div style="background-color:#161b22;border:1px solid #d29922;border-left:4px solid #d29922;
+                padding:12px 16px;border-radius:6px;margin-bottom:8px;">
+        <strong style="color:#d29922;">⚠️ RESEARCH NOTICE — NOT A TRADING SIGNAL</strong><br>
+        <span style="color:#c9d1d9;">
+        This dashboard reports macro and positioning conditions for situational awareness.
+        Its indicator has been backtested over 2000&ndash;2026 (macro gate and spatial sweep)
+        and <strong>shows no statistically significant trading edge</strong>. It must not be
+        used as a buy/sell signal or to size positions. See docs/SYSTEMS_AUDIT_LOG.md.
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 st.markdown("---")
 
 
@@ -184,9 +204,27 @@ def load_history():
     return data if data and data.get("points") else None
 
 
+def load_trend_context():
+    """Multi-decade context: macro trend + price trend. None if the history store is absent."""
+    return {
+        "macro": _get_json(MACRO_HISTORY_URL, timeout=8),
+        "price": _get_json(PRICE_HISTORY_URL, timeout=8),
+    }
+
+
+def load_series(name, limit=260):
+    data = _get_json(SERIES_URL, params={"name": name, "limit": limit}, timeout=10)
+    if not data or not data.get("points"):
+        return None
+    df = pd.DataFrame(data["points"])
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date")["value"]
+
+
 macro, macro_source = load_macro_state()
 spatial, spatial_source = load_spatial()
 history = load_history()
+trend = load_trend_context()
 
 # Authentication failure is a hard stop: never present local/baseline values as if the
 # handshake succeeded. The banner is rendered first and the panels are suppressed.
@@ -208,22 +246,27 @@ def _fmt(value, spec=",.2f", prefix="$"):
     return f"{prefix}{value:{spec}}" if value is not None else "—"
 
 
-# --- Row 1: system status banner -------------------------------------------------
-st.markdown("### 🛡️ System Executive Control State")
+# --- Row 1: macro regime banner ---------------------------------------------------
+# These are OBSERVATIONAL regime labels, not entry instructions. The prior wording
+# ("SYSTEM ENTER GATE OPEN — SEARCHING FOR LIQUIDITY SWEEPS") implied a trade
+# instruction that the backtests did not support.
+st.markdown("### 🛡️ Macro Regime Monitor")
 gate_status = macro["system_gate_status"]
 if gate_status == "OPEN":
     st.markdown(
-        '<div class="gate-open">🟢 SYSTEM ENTER GATE OPEN — SEARCHING FOR SESSION LIQUIDITY SWEEPS</div>',
+        '<div class="gate-open">🟢 CONDITIONS MET — FUND FLOW &amp; MACRO BOTH FAVOURABLE '
+        '(observational only)</div>',
         unsafe_allow_html=True,
     )
 elif gate_status == "CLOSED":
     st.markdown(
-        '<div class="gate-closed">🔴 SYSTEM ENTER GATE CLOSED — MACRO BIAS INACTIVE</div>',
+        '<div class="gate-closed">🔴 CONDITIONS NOT MET — MACRO FILTER UNFAVOURABLE '
+        '(observational only)</div>',
         unsafe_allow_html=True,
     )
 else:
     st.markdown(
-        '<div class="gate-closed">⚪ SYSTEM STATE UNAVAILABLE — NO AUTHORITATIVE MACRO RECORD</div>',
+        '<div class="gate-closed">⚪ MACRO STATE UNAVAILABLE — NO AUTHORITATIVE RECORD</div>',
         unsafe_allow_html=True,
     )
 
@@ -253,16 +296,19 @@ with col2:
     if sdi is None:
         sdi_color, sdi_label, sdi_text = "#8b949e", "DATA UNAVAILABLE", "—"
     else:
-        sdi_color = "#238636" if sdi > 0.50 else "#da3633"
-        sdi_label = "SMART MONEY ACCUMULATING" if sdi > 0.50 else "SMART MONEY DISTRIBUTING"
+        sdi_color = "#58a6ff"
+        # Descriptive positioning bands, not a recommendation.
+        sdi_label = ("NET POSITIONING: UPPER RANGE" if sdi > 0.50
+                     else "NET POSITIONING: LOWER RANGE")
         sdi_text = f"{sdi:+.2f}"
     st.markdown(
         f"""
         <div class="metric-card">
             <h4>📊 INSTITUTIONAL FUND FLOW</h4>
-            <p>Sentiment Divergence Index (SDI)</p>
+            <p>Commercial Positioning Percentile (SDI)</p>
             <h2 style="color: {sdi_color};">{sdi_text}</h2>
             <p style="color: {sdi_color};">{sdi_label}</p>
+            <p style="color: #8b949e;">Percentile of the trailing 52-week range</p>
         </div>
     """,
         unsafe_allow_html=True,
@@ -276,10 +322,11 @@ with col3:
         f"""
         <div class="metric-card">
             <h4>📍 SPATIAL MARKET BOUNDARY</h4>
-            <p>3-Day Structural Low → Sweep Floor</p>
+            <p>3-Day Structural Low → Reference Level</p>
             <h2>{_fmt(floor)}</h2>
-            <p style="color: #58a6ff;">3D LOW: {_fmt(low)} · BUFFER: ${SWEEP_BUFFER_USD:.2f} (150 pips)</p>
+            <p style="color: #58a6ff;">3D LOW: {_fmt(low)} · OFFSET: ${SWEEP_BUFFER_USD:.2f} (150 pips)</p>
             <p style="color: #8b949e;">ATR(14): {f"{atr:,.2f}" if atr is not None else "—"}</p>
+            <p style="color: #8b949e;">Reference geometry only — not an entry level</p>
         </div>
     """,
         unsafe_allow_html=True,
@@ -305,3 +352,67 @@ if history:
     )
 else:
     st.warning("Live price history feed unavailable — chart suppressed rather than showing synthetic data.")
+
+
+# --- Row 4: historical context (trend + positioning percentile) -------------------
+st.markdown("---")
+st.markdown("### 🧭 Historical Context")
+mh = trend.get("macro") if trend else None
+ph = trend.get("price") if trend else None
+
+if mh or ph:
+    tcol1, tcol2, tcol3, tcol4 = st.columns(4)
+    with tcol1:
+        if mh:
+            st.metric("Macro history", f"{mh['total_points']:,} weeks",
+                      help=f"since {mh['history_start']} · latest {mh['as_of']}")
+        else:
+            st.metric("Macro history", "—")
+    with tcol2:
+        if mh:
+            c = mh["commercial_net_change_4w"]
+            st.metric("Comm. net 4w change", f"{c:+,.0f}", delta=f"{c:+,.0f}")
+        else:
+            st.metric("Comm. net 4w change", "—")
+    with tcol3:
+        if ph:
+            st.metric("Gold 52w return", f"{ph['return_52w_pct']:+.2f}%",
+                      delta=f"{ph['return_4w_pct']:+.2f}% (4w)")
+        else:
+            st.metric("Gold 52w return", "—")
+    with tcol4:
+        if ph:
+            st.metric("Realized vol (20d ann.)", f"{ph['realized_vol_20d_annual_pct']:.1f}%",
+                      help=f"52w range {ph['low_52w']:,.0f}–{ph['high_52w']:,.0f}")
+        else:
+            st.metric("Realized vol (20d ann.)", "—")
+
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        st.markdown("**Commercial positioning percentile (SDI, 5y)**")
+        sdi_series = load_series("sdi", limit=260)
+        if sdi_series is not None and not sdi_series.empty:
+            st.line_chart(sdi_series.rename("SDI percentile"))
+            st.caption("Percentile of trailing 52-week commercial net positioning. >0.50 = upper range.")
+        else:
+            st.caption("Series unavailable — history store not built.")
+    with chart_right:
+        st.markdown("**Gold close — since Jan 2000**")
+        close_series = load_series("close", limit=5000)
+        if close_series is not None and not close_series.empty:
+            st.line_chart(close_series.rename("GC=F close (USD)"))
+            st.caption(f"{len(close_series):,} daily bars · futures proxy, not XAU/USD spot.")
+        else:
+            st.caption("Series unavailable — history store not built.")
+
+    if mh:
+        st.caption(
+            f"Committed 52w positioning range: {mh['commercial_net_52w_low']:,.0f} to "
+            f"{mh['commercial_net_52w_high']:,.0f} · gate open in {mh['gate_open_weeks_52w']} of the "
+            f"last 52 weeks (observational — the gate has no demonstrated edge)."
+        )
+else:
+    st.info(
+        "Historical context unavailable. Build it with:\n\n"
+        "`python -m backend.app.history_store`"
+    )

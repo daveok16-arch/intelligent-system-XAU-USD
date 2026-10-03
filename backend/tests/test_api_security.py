@@ -96,5 +96,76 @@ class TestAPISecurity(unittest.TestCase):
         self.assertNotIn("sentiment_divergence_index", body)
 
 
+class TestBruteForceAndRotation(unittest.TestCase):
+    """Rate limiting on repeated 401s, and token rotation without client downtime."""
+
+    def setUp(self):
+        os.environ["SYSTEM_AUTH_TOKEN"] = TOKEN
+        os.environ["AUTH_FAILURE_MAX"] = "3"
+        os.environ["AUTH_FAILURE_WINDOW_SECONDS"] = "60"
+        importlib.reload(main)          # picks up AUTH_FAILURE_MAX
+        main._failed_auth.clear()
+        self.client = TestClient(main.app)
+
+    def tearDown(self):
+        for k in ("SYSTEM_AUTH_TOKEN", "AUTH_FAILURE_MAX", "AUTH_FAILURE_WINDOW_SECONDS",
+                  "SYSTEM_AUTH_TOKEN_PREVIOUS"):
+            os.environ.pop(k, None)
+        importlib.reload(main)
+
+    def test_repeated_failures_trigger_429(self):
+        """After the threshold, further attempts are rejected without re-checking the token."""
+        statuses = [self.client.get("/api/v1/macro-state",
+                                    headers={"Authorization": "Bearer wrong"}).status_code
+                    for _ in range(6)]
+        self.assertIn(401, statuses)
+        self.assertEqual(statuses[-1], 429)
+        self.assertEqual(statuses.count(429), 3)  # max=3 failures allowed, then limited
+
+    def test_429_carries_retry_after(self):
+        for _ in range(4):
+            self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong"})
+        resp = self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(resp.headers.get("retry-after"), "60")
+
+    def test_valid_token_clears_the_failure_counter(self):
+        for _ in range(2):
+            self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(self.client.get("/api/v1/macro-state", headers=AUTH).status_code, 200)
+        # Counter cleared, so we can fail again without immediately hitting the limit.
+        self.assertEqual(
+            self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong"}).status_code,
+            401)
+
+    def test_rate_limit_is_per_origin(self):
+        for _ in range(4):
+            self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong",
+                                                            "X-Forwarded-For": "10.0.0.1"})
+        # A different origin must be unaffected.
+        other = self.client.get("/api/v1/macro-state", headers={"Authorization": "Bearer wrong",
+                                                                "X-Forwarded-For": "10.0.0.2"})
+        self.assertEqual(other.status_code, 401)
+
+    def test_health_is_never_rate_limited(self):
+        for _ in range(10):
+            self.client.get("/health")
+        self.assertEqual(self.client.get("/health").status_code, 200)
+
+    def test_previous_token_is_accepted_during_rotation(self):
+        os.environ["SYSTEM_AUTH_TOKEN_PREVIOUS"] = "old-token-1,old-token-2"
+        importlib.reload(main)
+        main._failed_auth.clear()
+        client = TestClient(main.app)
+        for tok in (TOKEN, "old-token-1", "old-token-2"):
+            self.assertEqual(client.get("/api/v1/macro-state",
+                                        headers={"Authorization": f"Bearer {tok}"}).status_code, 200)
+        self.assertEqual(client.get("/api/v1/macro-state",
+                                    headers={"Authorization": "Bearer retired"}).status_code, 401)
+
+    def test_accepted_tokens_defaults_to_primary_only(self):
+        self.assertEqual(main.accepted_tokens(), [TOKEN])
+
+
 if __name__ == "__main__":
     unittest.main()

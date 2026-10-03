@@ -130,6 +130,7 @@ def test_app_renders_without_exception(monkeypatch):
     captions = " ".join(c.value for c in at.caption)
     # Spatial card must now be driven by the spatial source, not the macro repo.
     assert "SPATIAL MARKET BOUNDARY" in md
+    assert "NOT A TRADING SIGNAL" in md
     assert "Spatial source:" in captions
     assert "150 pips" in md
 
@@ -193,6 +194,6 @@ def test_auth_failure_banner_and_state_scrub(monkeypatch):
         assert len(at.exception) == 0, [e.value for e in at.exception]
         md = " ".join(m.value for m in at.markdown)
         assert "AUTHENTICATION HANDSHAKE FAILED" in md
-        assert "SYSTEM STATE UNAVAILABLE" in md
+        assert "MACRO STATE UNAVAILABLE" in md
     finally:
         server.shutdown()

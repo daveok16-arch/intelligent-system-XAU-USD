@@ -188,6 +188,42 @@ class MasterSystemOrchestrator:
 
             SpatialBoundaryEngine(ticker="GC=F").execute_pipeline()
 
+        self._warm_history_store()
+
+    def _warm_history_store(self):
+        """Ensure the historical reference store exists AND is reasonably current.
+
+        Existence alone is not enough: a store built once and never refreshed silently
+        ages, so the trend panel would show stale context while looking healthy. Refresh
+        when the file is missing or older than HISTORY_MAX_AGE_DAYS.
+        """
+        history_dir = os.path.join(DATA_DIR, "history")
+        marker = os.path.join(history_dir, "macro_history.csv")
+        freshness_days = int(os.getenv("HISTORY_MAX_AGE_DAYS", "7"))
+
+        needs_build = not (os.path.exists(marker) and os.path.getsize(marker) > 0)
+        reason = "missing"
+        if not needs_build:
+            age_days = (time.time() - os.path.getmtime(marker)) / 86400.0
+            if age_days > freshness_days:
+                needs_build = True
+                reason = f"stale ({age_days:.1f}d > {freshness_days}d)"
+
+        if not needs_build:
+            return
+
+        print(f"📚 [CACHE WARMING] History store {reason}. Building reference history...")
+        try:
+            import history_store
+
+            rc = history_store.main([])
+            if rc == 0:
+                print("📚 [CACHE WARMING] History store refreshed.")
+        except Exception as exc:
+            # History is an enhancement; its absence must not stop the platform booting.
+            print(f"⚠️  [CACHE WARMING] History build failed ({type(exc).__name__}: {exc}). "
+                  f"Trend panels will report unavailable.")
+
     # --- worker loops -------------------------------------------------------------
     def run_macro_loop(self):
         """Isolated worker. Polls every interval and runs only inside the Friday

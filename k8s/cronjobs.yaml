@@ -52,15 +52,15 @@ spec:
                 - secretRef:
                     name: system-auth-credentials
               volumeMounts:
-                - name: macro-data
+                - name: repository-data
                   mountPath: /workspace/project/data
               resources:
                 requests: { cpu: "100m", memory: "256Mi" }
                 limits:   { cpu: "500m", memory: "512Mi" }
           volumes:
-            - name: macro-data
+            - name: repository-data
               persistentVolumeClaim:
-                claimName: macro-data-pvc
+                claimName: institutional-data-pvc
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -95,12 +95,12 @@ spec:
                 - secretRef:
                     name: system-auth-credentials
               volumeMounts:
-                - name: spatial-data
+                - name: repository-data
                   mountPath: /workspace/project/data
               resources:
                 requests: { cpu: "100m", memory: "256Mi" }
                 limits:   { cpu: "500m", memory: "512Mi" }
           volumes:
-            - name: spatial-data
+            - name: repository-data
               persistentVolumeClaim:
-                claimName: spatial-data-pvc
+                claimName: institutional-data-pvc
