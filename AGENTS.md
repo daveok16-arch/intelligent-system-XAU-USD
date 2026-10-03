@@ -431,6 +431,77 @@ capture the same thing.
 input to position sizing — "volatility is likely 20–50% above the EWMA estimate for the
 next few bars after a pierce" — and it is replicated across four metals.
 
+## Robustness controls — two findings retracted
+
+`backend/app/microstructure_robustness.py`. Two results were at risk of being artefacts.
+Both were tested with the stricter null. **Both failed.**
+
+### R1 — session clustering: FALSIFIED
+
+The claim was that sweeps cluster in the New York session (earlier reported as 3×). But if
+NY simply *moves more*, more bars cross a rolling low there purely because more ground is
+covered. The control normalises the pierce rate by the session's mean absolute return —
+"pierces per unit of movement".
+
+| asset | raw NY/other | volatility-normalised | survives |
+|---|---|---|---|
+| gold | 1.309× | **1.015×** | no |
+| silver | 1.364× | **0.999×** | no |
+| platinum | 1.147× | **0.901×** | no |
+| copper | 1.194× | **0.948×** | no |
+
+Median raw **1.252×** → median normalised **0.974×**. **0 of 4 survive.**
+
+**The session clustering was an artefact of volatility, not session structure.** New York
+does not produce more sweeps per unit of movement; it produces more movement, and that
+crosses more levels. The earlier "3× concentration" figure came from a coarser session
+definition and did not apply this control.
+
+### R2 — the volatility forecast: does not survive
+
+The claim was that sweep state forecasts volatility beyond EWMA. But a sweep happens in
+conditions that are *already* volatile, so sweep may only proxy today's volatility. The
+control adds the current bar's absolute return.
+
+| asset | RMSE EWMA | +curvol | +curvol+sweep | sweep t | DM vs +curvol | survives |
+|---|---|---|---|---|---|---|
+| gold | 0.64845 | 0.63707 | 0.63662 | 4.550 | 1.022 | no |
+| silver | 0.78829 | 0.75473 | 0.75377 | 3.886 | **2.368** | yes |
+| platinum | 0.70077 | 0.68045 | 0.67982 | 4.800 | 1.339 | no |
+| copper | 0.62097 | 0.61629 | 0.61633 | 4.602 | −0.076 | no |
+
+**1 of 4 survives.** The sweep coefficient *stays* significant in-sample (t = 3.9–4.8)
+while the out-of-sample forecast barely improves — median **+0.08% RMSE**. That is the
+same in-sample/out-of-sample trap this project has now hit four times.
+
+**With current volatility controlled, sweep state adds little. The "forecast" was largely
+volatility persistence**, which every existing model already captures.
+
+### What actually survives every control
+
+One thing, and it is descriptive rather than predictive:
+
+| finding | status |
+|---|---|
+| Directional edge | **no** — three studies, all negative |
+| Session clustering | **falsified** (R1) |
+| Volatility forecast beyond EWMA | **fails** with current-vol control (R2) |
+| Sweep volume signature | **survives** — 2.14× trailing-median volume, t = 13.9, 4/4 assets |
+
+**Sweep bars carry ~2.1× normal volume, replicated across four metals.** That is a
+*detection* fact: something unusual is happening now. It has never been shown to forecast
+direction, magnitude beyond existing models, or timing.
+
+### Why this is the right outcome
+
+Two claims were retracted by my own controls. That is the process working — the same
+discipline that caught the fabricated t=634, the null-inflation trap, the entry-bar
+foresight, and the loose EWMA guard. A research programme that only ever confirms its own
+hypotheses is not doing research.
+
+**The honest summary of this project's market-intelligence finding: institutional
+liquidity-taking is detectable in volume, and nothing more has survived testing.**
+
 ## Conditional studies + walk-forward (the earlier finding)
 
 Following the volume and session leads, three further pre-registered studies were run.
